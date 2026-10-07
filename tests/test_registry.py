@@ -61,3 +61,18 @@ def test_stopping_a_parent_marks_it_stopping_and_lists_children_first(reg):
     assert order == ["w1", "lead"]
     assert reg.get("lead")["state"] == "stopping"
     assert reg.is_stopping("lead")
+
+
+def test_a_name_can_be_reused_after_the_agent_stopped_and_history_is_kept(reg):
+    reg.reserve("t1", caller="lead", request_id="a", digest="d1", name="w1", role="worker", parent="lead")
+    reg.update("w1", state="stopped")
+    again = reg.reserve("t1", caller="lead", request_id="b", digest="d2", name="w1", role="worker", parent="lead")
+    assert again["retry"] is False and again["state"] == "reserved"
+    assert [r["state"] for r in reg.history("w1")] == ["stopped", "reserved"]
+
+
+def test_two_live_agents_cannot_share_a_name(reg):
+    from openshell_teams.registry import NameInUse
+    reg.reserve("t1", caller="lead", request_id="a", digest="d1", name="w1", role="worker", parent="lead")
+    with pytest.raises(NameInUse):
+        reg.reserve("t1", caller="lead", request_id="b", digest="d2", name="w1", role="worker", parent="lead")

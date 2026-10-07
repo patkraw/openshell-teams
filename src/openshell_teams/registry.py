@@ -17,6 +17,10 @@ class RequestIdReused(Exception):
     pass
 
 
+class NameInUse(Exception):
+    pass
+
+
 class Registry:
     def __init__(self, path: Path):
         self._lock = threading.Lock()
@@ -25,7 +29,7 @@ class Registry:
         self._db.executescript("""
             CREATE TABLE IF NOT EXISTS teams (team TEXT PRIMARY KEY, max_workers INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS agents (
-                name TEXT PRIMARY KEY, team TEXT NOT NULL, role TEXT NOT NULL, parent TEXT,
+                id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, team TEXT NOT NULL, role TEXT NOT NULL, parent TEXT,
                 caller TEXT NOT NULL, request_id TEXT NOT NULL, digest TEXT NOT NULL,
                 counts INTEGER NOT NULL, state TEXT NOT NULL, sandbox_id TEXT, generation TEXT,
                 grant_hash TEXT, created_at REAL NOT NULL,
@@ -48,6 +52,10 @@ class Registry:
                         raise RequestIdReused(request_id)
                     self._db.execute("COMMIT")
                     return {**dict(row), "retry": True}
+                live = self._db.execute(
+                    "SELECT 1 FROM agents WHERE name=? AND state != 'stopped'", (name,)).fetchone()
+                if live:
+                    raise NameInUse(name)
                 if counts:
                     (limit,) = self._db.execute("SELECT max_workers FROM teams WHERE team=?", (team,)).fetchone()
                     (used,) = self._db.execute(
@@ -66,21 +74,28 @@ class Registry:
             return {**self.get(name), "retry": False}
 
     def update(self, name: str, **fields) -> None:
+        """Update the newest record for `name`."""
         cols = ", ".join(f"{k}=?" for k in fields)
         with self._lock:
-            self._db.execute(f"UPDATE agents SET {cols} WHERE name=?", (*fields.values(), name))
+            self._db.execute(f"UPDATE agents SET {cols} WHERE id=(SELECT MAX(id) FROM agents WHERE name=?)",
+                             (*fields.values(), name))
 
     def get(self, name: str) -> dict | None:
-        row = self._db.execute("SELECT * FROM agents WHERE name=?", (name,)).fetchone()
+        """The newest record for `name` (earlier, stopped ones are kept as history)."""
+        row = self._db.execute("SELECT * FROM agents WHERE name=? ORDER BY id DESC LIMIT 1", (name,)).fetchone()
         return dict(row) if row else None
 
+    def history(self, name: str) -> list[dict]:
+        return [dict(r) for r in self._db.execute("SELECT * FROM agents WHERE name=? ORDER BY id", (name,))]
+
     def by_sandbox(self, sandbox_id: str) -> dict | None:
-        row = self._db.execute("SELECT * FROM agents WHERE sandbox_id=?", (sandbox_id,)).fetchone()
+        row = self._db.execute("SELECT * FROM agents WHERE sandbox_id=? ORDER BY id DESC LIMIT 1",
+                               (sandbox_id,)).fetchone()
         return dict(row) if row else None
 
     def children(self, name: str) -> list[str]:
         return [r["name"] for r in self._db.execute(
-            "SELECT name FROM agents WHERE parent=? AND state != 'stopped' ORDER BY created_at", (name,))]
+            "SELECT name FROM agents WHERE parent=? AND state != 'stopped' ORDER BY id", (name,))]
 
     def is_stopping(self, name: str) -> bool:
         row = self.get(name)

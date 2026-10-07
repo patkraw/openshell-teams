@@ -64,7 +64,15 @@ class OpenShellCLI:
         subprocess.Popen([*args, "--", *command], stdout=log, stderr=log, start_new_session=True)
 
     def delete(self, name: str) -> None:
+        """Delete and wait until the sandbox is gone, so its name can be reused."""
         try:
             self._run("sandbox", "delete", name, timeout=120)
         except OpenShellError:
-            pass
+            return
+        deadline = time.time() + 120
+        while time.time() < deadline:
+            try:
+                self.get(name)
+            except OpenShellError:
+                return
+            time.sleep(2)

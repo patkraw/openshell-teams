@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from . import channel_guard, policy
 from .charter import TeamCharter
-from .registry import LimitReached, Registry, RequestIdReused
+from .registry import LimitReached, NameInUse, Registry, RequestIdReused
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +125,8 @@ class SpawnGate:
             raise Rejected(str(error), "limit") from error
         except RequestIdReused as error:
             raise Rejected("request ID reused for a different request", "request_id_reused") from error
+        except NameInUse as error:
+            raise Rejected(f"an agent named {req.name!r} is already running", "name_in_use") from error
         if slot["retry"]:
             return slot
         try:
