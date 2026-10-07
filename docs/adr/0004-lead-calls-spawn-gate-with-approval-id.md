@@ -1,0 +1,3 @@
+# The lead calls Spawn Gate itself, carrying a single-use approval ID
+
+In OpenWorker the approval card lives in the server, but the lead (not the server) asks Spawn Gate for each worker, carrying an approval ID the server issued when the user approved the card. Spawn Gate confirms the ID with the server: it must belong to this lead (Passport sandbox and generation) and team, match the exact proposed policy, role and providers the user saw, and be unused and unexpired. We chose this over the server calling Spawn Gate on the lead's behalf so that every harness uses the same request path, with or without an approval card.
