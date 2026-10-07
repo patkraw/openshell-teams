@@ -1,0 +1,20 @@
+version: 1
+network_middlewares:
+  passport:
+    middleware: passport
+    order: 10
+    on_error: fail_closed
+    endpoints:
+      include: [host.openshell.internal]
+network_policies:
+  board:
+    name: board
+    endpoints:
+      - host: host.openshell.internal
+        port: 18765
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/v1/board/**" }
+    binaries:
+      - path: /usr/bin/bash
