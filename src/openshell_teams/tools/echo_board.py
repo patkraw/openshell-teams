@@ -34,7 +34,7 @@ def make_handler(public_key, audience):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--keys", type=Path, required=True)
-    parser.add_argument("--audience", default="board.local")
+    parser.add_argument("--audience", default="host.openshell.internal:18765")
     parser.add_argument("--port", type=int, default=18765)
     args = parser.parse_args()
     keys = passport.load_or_create_keys(args.keys)

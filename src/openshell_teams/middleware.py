@@ -20,9 +20,8 @@ log = logging.getLogger(__name__)
 
 
 class PassportMiddleware(pb_grpc.SupervisorMiddlewareServicer):
-    def __init__(self, keys: passport.Keys, audience: str):
+    def __init__(self, keys: passport.Keys):
         self.keys = keys
-        self.audience = audience
 
     def Describe(self, request, context):
         return pb.MiddlewareManifest(
@@ -49,8 +48,11 @@ class PassportMiddleware(pb_grpc.SupervisorMiddlewareServicer):
         if not sandbox_id:
             return pb.HttpRequestResult(decision=pb.DECISION_DENY, reason="no sandbox id",
                                         reason_code="passport.no_sandbox")
+        # The audience is the exact service the request goes to, so a Passport minted for
+        # one service cannot be replayed against another on the same host.
+        audience = passport.audience_for(request.target.host, request.target.port)
         token = passport.sign(self.keys.private, sandbox_id=sandbox_id,
-                              sandbox=request.context.sandbox, audience=self.audience)
+                              sandbox=request.context.sandbox, audience=audience)
         log.info("passport for sandbox=%s name=%s host=%s", sandbox_id, request.context.sandbox,
                  request.target.host)
         return pb.HttpRequestResult(
@@ -61,24 +63,23 @@ class PassportMiddleware(pb_grpc.SupervisorMiddlewareServicer):
         )
 
 
-def serve(keys_dir: Path, audience: str, port: int) -> None:
+def serve(keys_dir: Path, port: int) -> None:
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     pb_grpc.add_SupervisorMiddlewareServicer_to_server(
-        PassportMiddleware(passport.load_or_create_keys(keys_dir), audience), server)
+        PassportMiddleware(passport.load_or_create_keys(keys_dir)), server)
     server.add_insecure_port(f"127.0.0.1:{port}")
     server.start()
-    log.info("passport middleware on 127.0.0.1:%d (audience %s)", port, audience)
+    log.info("passport middleware on 127.0.0.1:%d", port)
     server.wait_for_termination()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Sandbox Passport middleware")
     parser.add_argument("--keys", type=Path, required=True)
-    parser.add_argument("--audience", default="board.local")
     parser.add_argument("--port", type=int, default=50061)
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
-    serve(args.keys, args.audience, args.port)
+    serve(args.keys, args.port)
 
 
 if __name__ == "__main__":

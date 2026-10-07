@@ -1,0 +1,5 @@
+service: host.openshell.internal:8765
+binaries: [/usr/bin/bash]
+actions:
+  read:    { method: GET,  path: "/v1/board/**" }
+  comment: { method: POST, path: "/v1/board/items/comment" }

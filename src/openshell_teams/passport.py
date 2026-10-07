@@ -18,6 +18,10 @@ ISSUER = "openshell-teams/passport"
 LIFETIME_SECONDS = 60
 
 
+def audience_for(host: str, port: int) -> str:
+    return f"{host}:{port}"
+
+
 class InvalidPassport(Exception):
     pass
 
