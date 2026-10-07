@@ -1,0 +1,4 @@
+# OpenWorker's board roles (role-level rules; the board enforces slice and "no done" itself)
+roles:
+  lead: [read, create, assign, comment]
+  worker: [read, comment]
