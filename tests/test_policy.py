@@ -100,3 +100,47 @@ def test_passport_middleware_is_bound_to_the_board_host():
     assert entry["middleware"] == "passport"
     assert entry["on_error"] == "fail_closed"
     assert entry["endpoints"]["include"] == ["host.openshell.internal"]
+
+
+# --- review findings -----------------------------------------------------------------------
+
+def test_mcp_endpoint_with_a_wider_binary_scope_is_rejected():
+    """Review finding 4: equality compared endpoints but dropped the entry's binaries;
+    an empty binary list means any binary."""
+    ceiling = base(tools=[mcp("mcp.local", 9000, ["read"])])
+    candidate = base(tools=[mcp("mcp.local", 9000, ["read"])])
+    candidate["network_policies"]["tools"]["binaries"] = []
+    assert policy.check_unmodelled(candidate, ceiling, fixed_middlewares={})
+
+
+def test_mcp_endpoint_with_the_same_binaries_in_another_order_is_accepted():
+    ceiling = base(tools=[mcp("mcp.local", 9000, ["read"])])
+    ceiling["network_policies"]["tools"]["binaries"] = [{"path": "/a"}, {"path": "/b"}]
+    candidate = copy.deepcopy(ceiling)
+    candidate["network_policies"]["tools"]["binaries"] = [{"path": "/b"}, {"path": "/a"}]
+    assert policy.check_unmodelled(candidate, ceiling, fixed_middlewares={}) == []
+
+
+def test_launched_policy_may_add_only_provider_entries_and_middleware_names():
+    grant = base(github=[rest("api.github.com", 443, [{"allow": {"method": "GET", "path": "/**"}}])])
+    grant["network_middlewares"] = {"passport": {"middleware": "passport", "order": 10}}
+    launched = copy.deepcopy(grant)
+    launched["network_middlewares"]["passport"]["name"] = "passport"
+    launched["network_policies"]["_provider_openworker_nvidia"] = {
+        "name": "_provider_openworker_nvidia", "endpoints": [rest("inference.example", 443, [])]}
+    assert policy.launch_differences(grant, launched, providers=["openworker-nvidia"]) == []
+
+
+def test_launched_policy_with_extra_access_differs_from_the_grant():
+    """Review finding 5: read-back must equal the admitted grant, not just fit the boundary."""
+    grant = base()
+    grant["network_middlewares"] = {"passport": {"middleware": "passport", "order": 10}}
+    wider = copy.deepcopy(grant)
+    wider["network_policies"]["github"] = {"endpoints": [rest("api.github.com", 443, [])]}
+    assert policy.launch_differences(grant, wider, providers=[])
+    unbound = copy.deepcopy(grant)
+    del unbound["network_middlewares"]
+    assert policy.launch_differences(grant, unbound, providers=[])
+    stray = copy.deepcopy(grant)
+    stray["network_policies"]["_provider_other"] = {"endpoints": [rest("x.example", 443, [])]}
+    assert policy.launch_differences(grant, stray, providers=[])

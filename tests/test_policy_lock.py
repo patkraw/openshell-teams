@@ -77,3 +77,12 @@ def test_evaluate_denies_through_the_grpc_servicer(tmp_path):
     manifest = lock.Describe(pb.DescribeRequest(), None)
     assert "openshell.gateway-interceptor.contract" in manifest.extension.supported_capabilities
     assert all(b.failure_policy == "fail_closed" for b in manifest.bindings)
+
+
+def test_missing_registry_fails_closed(tmp_path):
+    """Review finding 12: a missing registry was read as 'no teams', allowing every change."""
+    lock = PolicyLock(tmp_path / "nope.db")
+    ev = pb.InterceptorEvaluation(service="openshell.v1.OpenShell", method="UpdateConfig")
+    json_format.ParseDict({"sandbox": "anything", "policy": {}}, ev.validate.proposed_operation)
+    result = lock.Evaluate(ev, None)
+    assert not result.allowed and "unavailable" in result.reason

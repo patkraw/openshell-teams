@@ -41,7 +41,7 @@ class AgentRequest:
     policy: dict
     task: str
     request_id: str
-    kind: str = "staffing"            # staffing | delegation | lead
+    kind: str = "staffing"            # one of KINDS
     providers: list[str] = field(default_factory=list)
     command: list[str] = field(default_factory=list)   # what to start in the sandbox
     persona: str = ""                                  # the harness persona to run, e.g. reviewer
@@ -52,6 +52,9 @@ class AgentRequest:
                            "providers": sorted(self.providers), "task": self.task,
                            "kind": self.kind}, sort_keys=True)
         return hashlib.sha256(body.encode()).hexdigest()
+
+
+KINDS = ("lead", "staffing", "delegation")
 
 
 def approval_digest(req: "AgentRequest") -> str:
@@ -74,6 +77,9 @@ class SpawnGate:
 
     # -- step 2: authorize ------------------------------------------------------------
     def _authorize(self, req: AgentRequest, caller: Caller, charter: TeamCharter) -> str:
+        # A closed set: every other value is refused before anything is reserved.
+        if req.kind not in KINDS:
+            raise Rejected(f"unknown request kind {req.kind!r}", "bad_kind")
         if req.kind == "lead":
             if caller.kind != "operator":
                 raise Rejected("only the trusted harness server may create a team's lead", "not_authorized")
@@ -91,6 +97,10 @@ class SpawnGate:
             raise Rejected("delegation is not enabled for this team", "not_authorized")
         if req.role not in charter.access_rules or req.role == "lead":
             raise Rejected(f"unknown or reserved role {req.role!r}", "bad_role")
+        if not charter.runtime_command:
+            # Agents never choose what runs in a sandbox; without the team's runtime there
+            # is nothing trusted to run.
+            raise Rejected("this team defines no runtime for its agents", "no_runtime")
         return me["name"]
 
     # -- step 3: resolve --------------------------------------------------------------
@@ -106,8 +116,21 @@ class SpawnGate:
         return policy.with_passport(safe, board_host=charter.board.host)
 
     # -- step 4: check ----------------------------------------------------------------
-    def _check(self, grant: dict, req: AgentRequest, charter: TeamCharter) -> None:
-        ceiling = policy.with_passport(charter.boundary, board_host=charter.board.host)
+    def _ceiling(self, role: str, charter: TeamCharter) -> dict:
+        """The most an agent in `role` may have, with the team's fixed middleware."""
+        ceiling = channel_guard.role_ceiling(role, charter.boundary, charter.access_rules, charter.endpoint_map,
+                                             charter.board, binaries=charter.board_binaries,
+                                             lead_only=charter.lead_only)
+        return policy.with_passport(ceiling, board_host=charter.board.host)
+
+    def _prove(self, candidate: dict, ceiling: dict) -> str:
+        provable, _ = policy.split(candidate)
+        ceiling_provable, _ = policy.split(ceiling)
+        verdict, _detail = self.prover.check(provable, ceiling_provable)
+        return verdict
+
+    def _check(self, grant: dict, req: AgentRequest, role: str, charter: TeamCharter) -> None:
+        ceiling = self._ceiling(role, charter)
         errors = policy.check_unmodelled(grant, ceiling,
                                          fixed_middlewares=policy.passport_binding(charter.board.host))
         if errors:
@@ -115,9 +138,7 @@ class SpawnGate:
         bad = sorted(set(req.providers) - set(charter.credentials))
         if bad:
             raise Rejected(f"providers outside the team boundary: {bad}", "providers")
-        provable, _ = policy.split(grant)
-        ceiling_provable, _ = policy.split(ceiling)
-        verdict, detail = self.prover.check(provable, ceiling_provable)
+        verdict = self._prove(grant, ceiling)
         if verdict != "within_boundary":
             raise Rejected(f"prover: {verdict}", f"prover_{verdict}")
 
@@ -157,21 +178,27 @@ class SpawnGate:
         if charter.runtime_command and (caller.kind == "agent" or not req.command):
             # Agents never choose what runs in a sandbox: the team's runtime decides.
             req.command = charter.command_for(name=req.name, persona=req.persona, role=role)
-        if not req.providers:
+        if not req.providers and not (charter.require_approval and req.kind == "staffing"):
+            # An approved worker gets exactly the providers the user approved.
             req.providers = list(charter.default_providers)
         try:
             grant = self._resolve(req, charter)
-            self._check(grant, req, charter)
+            self._check(grant, req, role, charter)
             sandbox = self.openshell.create(req.name, grant, providers=req.providers,
                                             labels={"team": req.team, "role": slot["role"]})
             self.registry.update(req.name, state="created", sandbox_id=sandbox["id"],
                                  generation=sandbox.get("generation"), grant_hash=grant_hash(grant),
                                  grant_json=json.dumps(grant, sort_keys=True),
                                  providers=",".join(req.providers))
+            # Launched = checked: the policy OpenShell runs must equal the admitted grant,
+            # apart from what OpenShell itself adds for attached providers, and those
+            # additions must still be within the role's ceiling.
             launched = self.openshell.effective_policy(req.name)
-            launched_provable, _ = policy.split(launched)
-            ceiling_provable, _ = policy.split(policy.with_passport(charter.boundary, board_host=charter.board.host))
-            verdict, _ = self.prover.check(launched_provable, ceiling_provable)
+            differences = policy.launch_differences(grant, launched, providers=req.providers)
+            if differences:
+                raise Rejected("launched policy differs from the admitted grant: " + "; ".join(differences),
+                               "launch_check")
+            verdict = self._prove(launched, self._ceiling(role, charter))
             if verdict != "within_boundary":
                 raise Rejected(f"launched policy is not within the boundary: {verdict}", "launch_check")
             self.board.register(sandbox_id=sandbox["id"], team=req.team, name=req.name, role=slot["role"])

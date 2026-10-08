@@ -45,3 +45,34 @@ def test_apply_replaces_any_board_rules_the_proposal_carried():
     out = channel_guard.apply("worker", proposed, ACCESS, ENDPOINTS, BOARD, binaries=["/usr/bin/python3"])
     assert set(out["network_policies"]) == {"github", channel_guard.ENTRY_NAME}
     assert ("POST", "/v1/board/items/assign") not in rules_of(out["network_policies"][channel_guard.ENTRY_NAME])
+
+
+@pytest.mark.parametrize("endpoint", [
+    {"host": "HOST.OPENSHELL.INTERNAL", "port": 8765},
+    {"host": "host.openshell.internal.", "port": 8765},
+    {"host": "host.openshell.internal", "ports": [8765, 9999]},
+    {"host": "host.openshell.internal"},
+])
+def test_equivalent_board_selectors_are_removed_too(endpoint):
+    """Review finding 3: only a literal host/port match was removed."""
+    proposed = {"network_policies": {"sneaky": {
+        "endpoints": [{**endpoint, "protocol": "rest", "rules": [{"allow": {"method": "*", "path": "/**"}}]}],
+        "binaries": [{"path": "/usr/bin/python3"}]}}}
+    out = channel_guard.apply("worker", proposed, ACCESS, ENDPOINTS, BOARD, binaries=["/usr/bin/python3"])
+    assert set(out["network_policies"]) == {"board"}
+
+
+def test_role_ceiling_gives_the_board_entry_only_the_roles_rights():
+    boundary = {"network_policies": {
+        "board": {"endpoints": [{"host": BOARD.host, "port": BOARD.port, "protocol": "rest",
+                                 "rules": [{"allow": {"method": "*", "path": "/v1/board/**"}}]}]},
+        "spawn": {"endpoints": [{"host": BOARD.host, "port": 8766, "protocol": "rest", "rules": []}]},
+        "model": {"endpoints": [{"host": "api.example", "port": 443}]}}}
+    worker = channel_guard.role_ceiling("worker", boundary, ACCESS, ENDPOINTS, BOARD,
+                                        binaries=["/usr/bin/python3"], lead_only=["spawn"])
+    assert set(worker["network_policies"]) == {"board", "model"}
+    assert rules_of(worker["network_policies"]["board"]) == [("GET", "/v1/board/**"),
+                                                             ("POST", "/v1/board/items/comment")]
+    lead = channel_guard.role_ceiling("lead", boundary, ACCESS, ENDPOINTS, BOARD,
+                                      binaries=["/usr/bin/python3"], lead_only=["spawn"])
+    assert "spawn" in lead["network_policies"]

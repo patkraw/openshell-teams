@@ -44,8 +44,7 @@ class Live:
 
     @classmethod
     def from_registry(cls, path: Path) -> "Live":
-        if not Path(path).exists():  # Spawn Gate has not admitted anyone yet
-            return cls(set(), set())
+        # Opened read-only, so a missing registry raises instead of reading as "no teams".
         db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
             rows = db.execute("SELECT name, providers FROM agents a WHERE state != 'stopped' AND "
@@ -106,7 +105,14 @@ class PolicyLock(pb_grpc.GatewayInterceptorServicer):
         if not request.HasField("validate"):
             return pb.InterceptorResult(allowed=True)
         op = json_format.MessageToDict(request.validate.proposed_operation)
-        allowed, reason = decide(request.method, op, Live.from_registry(self.registry_path))
+        try:
+            live = Live.from_registry(self.registry_path)
+        except sqlite3.Error as error:
+            # Fail closed: without Spawn Gate's state, no team sandbox can be told apart.
+            log.error("registry unavailable: %s", error)
+            return pb.InterceptorResult(allowed=False, reason="Policy Lock: team state unavailable",
+                                        status_code="UNAVAILABLE")
+        allowed, reason = decide(request.method, op, live)
         who = dict(request.principal)
         log.info("%s %s by %s: %s", "allow" if allowed else "DENY", request.method,
                  who.get("subject") or who.get("sandbox_id") or who.get("kind"), reason)

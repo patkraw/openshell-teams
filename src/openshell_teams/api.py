@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from . import charter as charter_mod
 from . import passport
 from .boardclient import ApprovalClient, BoardRegistrar
+from .channel_guard import reaches
 from .gate import AgentRequest, Caller, Rejected, SpawnGate
 from .openshell import OpenShellCLI
 from .prover import Prover
@@ -96,9 +97,14 @@ def create_app(gate: SpawnGate, public_key, audience: str, operator_token: str) 
             "team": team,
             "filesystem_policy": policy.get("filesystem_policy", {}),
             # Full entries, so a proposal can copy them exactly as the prover expects.
+            # Pieces a worker may be given: not the board (Channel Guard compiles it) and
+            # not lead-only entries such as the route to Spawn Gate.
             "network_policies": {name: entry for name, entry in policy.get("network_policies", {}).items()
-                                 if all((e["host"], e["port"]) != board for e in entry.get("endpoints", []))},
+                                 if name not in charter.lead_only
+                                 and not any(reaches(e, *board) for e in entry.get("endpoints", []))},
             "providers": charter.credentials,
+            # Proposals must name providers explicitly when the team requires approval.
+            "default_providers": charter.default_providers,
             "roles": sorted(r for r in charter.access_rules if r != "lead"),
             "max_workers": charter.max_workers,
         }

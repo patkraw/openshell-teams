@@ -36,6 +36,8 @@ class FakeOpenShell:
 
     def create(self, name, grant, providers, labels):
         sid = f"sb-{name}"
+        self.providers = getattr(self, "providers", {})
+        self.providers[name] = list(providers)
         self.created[name] = grant
         self.policies[name] = grant
         return {"id": sid, "generation": "g1"}
@@ -66,6 +68,7 @@ class FakeProver:
     """Within the boundary unless the candidate reaches a host the boundary lacks."""
 
     def check(self, candidate, boundary):
+        self.boundaries = getattr(self, "boundaries", []) + [boundary]
         hosts = lambda p: {e["host"] for v in p.get("network_policies", {}).values() for e in v["endpoints"]}
         return ("within_boundary", "") if hosts(candidate) <= hosts(boundary) else ("exceeds_boundary", "")
 
@@ -74,7 +77,8 @@ class FakeProver:
 def world(tmp_path):
     charter = TeamCharter(team="t1", boundary=copy.deepcopy(BOUNDARY), credentials=["anthropic", "github"],
                           max_workers=2, max_depth=1, lead_policy={"version": 1, "filesystem_policy": copy.deepcopy(FS)},
-                          access_rules=ACCESS, endpoint_map=ENDPOINTS, board=BOARD)
+                          access_rules=ACCESS, endpoint_map=ENDPOINTS, board=BOARD,
+                          runtime_command=["run", "{name}"])
     reg = Registry(tmp_path / "r.db")
     reg.add_team("t1", max_workers=2)
     os_, board = FakeOpenShell(), FakeBoard()
@@ -267,3 +271,93 @@ def test_missing_approval_is_refused_when_required(world):
     with pytest.raises(Rejected) as e:
         gate.admit(worker(), lead)
     assert e.value.code == "approval_required"
+
+
+# --- review findings -----------------------------------------------------------------------
+
+@pytest.mark.parametrize("kind", ["anything", "", "Staffing", "lead"])
+def test_unknown_or_reserved_kinds_from_an_agent_are_refused_before_reserving(world, kind):
+    """Review finding 1: only literal 'staffing' required a lead and approval."""
+    gate, reg, os_, _, lead = world
+    req = worker(name="sneaky")
+    req.kind = kind
+    with pytest.raises(Rejected) as e:
+        gate.admit(req, lead)
+    assert e.value.code in ("bad_kind", "not_authorized")
+    assert reg.get("sneaky") is None and "sneaky" not in os_.created
+
+
+def test_a_worker_cannot_create_a_worker_with_an_unknown_kind(world):
+    gate, _, _, _, lead = world
+    gate.admit(worker(), lead)
+    reviewer = Caller("agent", "reviewer", "sb-reviewer")
+    req = worker(name="child")
+    req.kind = "anything"
+    with pytest.raises(Rejected):
+        gate.admit(req, reviewer)
+
+
+def test_without_a_runtime_template_agents_cannot_start_their_own_command(world):
+    """Review finding 14: no runtime.yaml let the agent's command run."""
+    gate, reg, os_, _, lead = world
+    gate.charters["t1"].runtime_command = []
+    req = worker()
+    req.command = ["bash", "-c", "id"]
+    with pytest.raises(Rejected) as e:
+        gate.admit(req, lead)
+    assert e.value.code == "no_runtime" and "reviewer" not in os_.created
+
+
+def test_launched_policy_must_equal_the_admitted_grant(world):
+    """Review finding 5: read-back was proved against the boundary only."""
+    gate, reg, os_, board, lead = world
+    real_effective = os_.effective_policy
+
+    def widened(name):
+        p = copy.deepcopy(real_effective(name))
+        p["network_policies"]["github"] = copy.deepcopy(BOUNDARY["network_policies"]["github"])
+        return p
+    os_.effective_policy = widened
+    with pytest.raises(Rejected) as e:
+        gate.admit(worker(), lead)
+    assert e.value.code == "launch_check"
+    assert "reviewer" in os_.deleted and "reviewer" not in os_.started
+
+
+def test_workers_are_proved_against_their_roles_ceiling(world):
+    """Review finding 3: the ceiling allowed every board path, so a duplicate board
+    selector carrying wider rules still proved 'within'."""
+    gate, _, _, _, lead = world
+    gate.admit(worker(), lead)
+    ceiling = gate.prover.boundaries[-1]
+    rules = ceiling["network_policies"]["board"]["endpoints"][0]["rules"]
+    assert {(r["allow"]["method"], r["allow"]["path"]) for r in rules} == {
+        ("GET", "/v1/board/**"), ("POST", "/v1/board/items/comment")}
+
+
+def test_approved_workers_get_exactly_the_approved_providers(world):
+    """Review finding 10: default providers were added after the approval check."""
+    from openshell_teams.gate import approval_digest
+    gate, _, os_, _, lead = world
+    charter = gate.charters["t1"]
+    charter.require_approval, charter.default_providers = True, ["github"]
+    req = worker(providers=())
+    gate.approvals = FakeApprovals({"ap1": ("t1", "lead", "reviewer", approval_digest(req))})
+    req.approval_id = "ap1"
+    gate.admit(req, lead)
+    assert os_.providers["reviewer"] == []
+
+
+@pytest.mark.skipif(not shutil.which(PROVER) and not os.path.exists(PROVER), reason="openshell-prover not installed")
+def test_real_prover_refuses_an_equivalent_board_selector_with_wider_rules():
+    """Review finding 3, at the proof layer: against the worker's role ceiling, a second
+    board entry spelled in upper case with every method still exceeds the ceiling."""
+    from openshell_teams import channel_guard
+    ceiling = channel_guard.role_ceiling("worker", BOUNDARY, ACCESS, ENDPOINTS, BOARD,
+                                         binaries=["/usr/bin/python3"])
+    sneaky = copy.deepcopy(ceiling)
+    sneaky["network_policies"]["x"] = {"endpoints": [{
+        "host": BOARD.host.upper(), "port": BOARD.port, "protocol": "rest", "enforcement": "enforce",
+        "rules": [{"allow": {"method": "*", "path": "/v1/board/**"}}]}],
+        "binaries": [{"path": "/usr/bin/python3"}]}
+    assert Prover(PROVER, 90).check(sneaky, ceiling)[0] == "exceeds_boundary"

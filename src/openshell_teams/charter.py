@@ -28,6 +28,8 @@ class TeamCharter:
     runtime_command: list[str] = field(default_factory=list)
     default_providers: list[str] = field(default_factory=list)
     require_approval: bool = False   # each worker needs a single-use approval ID from the user
+    # Boundary entries only the lead may receive, e.g. the route to Spawn Gate.
+    lead_only: list[str] = field(default_factory=lambda: ["spawn"])
 
     def command_for(self, *, name: str, persona: str, role: str) -> list[str]:
         values = {"team": self.team, "name": name, "persona": persona or role, "role": role}
@@ -58,4 +60,5 @@ def load(directory: Path, team: str) -> TeamCharter:
         runtime_command=list(runtime.get("command", [])),
         default_providers=list(runtime.get("providers", [])),
         require_approval=bool(runtime.get("require_approval", False)),
+        lead_only=list(boundary.get("lead_only", ["spawn"])),
     )
