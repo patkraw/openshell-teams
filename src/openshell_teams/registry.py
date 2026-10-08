@@ -35,6 +35,9 @@ class Registry:
                 grant_hash TEXT, grant_json TEXT, created_at REAL NOT NULL,
                 UNIQUE (team, caller, request_id));
         """)
+        cols = {r["name"] for r in self._db.execute("PRAGMA table_info(agents)")}
+        if "providers" not in cols:  # comma-separated; read by Policy Lock
+            self._db.execute("ALTER TABLE agents ADD COLUMN providers TEXT")
 
     def add_team(self, team: str, *, max_workers: int) -> None:
         with self._lock:

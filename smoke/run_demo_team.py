@@ -212,7 +212,26 @@ def run_checks(TEAM, task_id, patch, proposal, op, app, comments) -> None:
     out = in_sandbox("lead", "git", "ls-remote", REPO)
     check("lead clones from GitHub", "HEAD" not in out, out.splitlines()[-1] if out else out)
 
-    # 7. Worker outliving its lead: Cascade Stop.
+    # 7. Widening after launch: Policy Lock (gateway interceptor) refuses policy and
+    #    credential changes to team sandboxes, even from the operator's own CLI. The CLI
+    #    may show only "permission denied", so the denial is confirmed in Policy Lock's log.
+    lock_log = STATE / "run/policy-lock.log"
+
+    def widen(label: str, method: str, *cmd: str) -> None:
+        before = lock_log.read_text().count(f"DENY {method}") if lock_log.exists() else 0
+        r = sh(OPENSHELL, *cmd)
+        denied = lock_log.read_text().count(f"DENY {method}") > before if lock_log.exists() else False
+        out = (r.stdout + r.stderr).strip()
+        check(label, r.returncode != 0 and denied,
+              f"exit={r.returncode} policy_lock={'DENY' if denied else 'no deny'}: "
+              f"{out.splitlines()[-1].strip() if out else ''}")
+
+    widen("operator widens the reviewer's policy", "UpdateConfig",
+          "policy", "update", "reviewer", "--add-endpoint", "example.com:443", "--binary", PY)
+    widen("operator attaches a credential to the reviewer", "AttachSandboxProvider",
+          "sandbox", "provider", "attach", "reviewer", "my-claude")
+
+    # 8. Worker outliving its lead: Cascade Stop.
     stopped = httpx.post(f"{GATE}/v1/agents/lead/stop", headers={"X-Operator-Token": op},
                          timeout=600).json()
     alive = [n for n in ("lead", "patcher", "reviewer")

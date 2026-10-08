@@ -1,0 +1,18 @@
+[openshell]
+version = 2
+
+[openshell.gateway]
+
+[[openshell.supervisor.middleware]]
+name = "passport"
+grpc_endpoint = "http://127.0.0.1:50061"
+allow_insecure_transport = true
+max_payload_bytes = 65536
+timeout = "500ms"
+
+[[openshell.gateway.interceptors]]
+name = "policy-lock"
+grpc_endpoint = "http://127.0.0.1:50062"
+allow_insecure_transport = true
+failure_policy = "fail_closed"
+timeout = "2s"

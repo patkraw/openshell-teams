@@ -166,7 +166,8 @@ class SpawnGate:
                                             labels={"team": req.team, "role": slot["role"]})
             self.registry.update(req.name, state="created", sandbox_id=sandbox["id"],
                                  generation=sandbox.get("generation"), grant_hash=grant_hash(grant),
-                                 grant_json=json.dumps(grant, sort_keys=True))
+                                 grant_json=json.dumps(grant, sort_keys=True),
+                                 providers=",".join(req.providers))
             launched = self.openshell.effective_policy(req.name)
             launched_provable, _ = policy.split(launched)
             ceiling_provable, _ = policy.split(policy.with_passport(charter.boundary, board_host=charter.board.host))
