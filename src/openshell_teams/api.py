@@ -133,11 +133,12 @@ def main() -> None:
     p.add_argument("--board-admin-url", required=True)
     p.add_argument("--board-admin-token-file", type=Path, required=True)
     p.add_argument("--operator-token-file", type=Path, required=True)
+    p.add_argument("--prover-timeout", type=int, default=90, help="seconds; a timeout is a rejection")
     p.add_argument("--image", default=None, help="sandbox image for every agent (default: OpenShell's base image)")
     a = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     a.state.mkdir(parents=True, exist_ok=True)
-    gate = SpawnGate({}, Registry(a.state / "registry.db"), Prover(a.prover),
+    gate = SpawnGate({}, Registry(a.state / "registry.db"), Prover(a.prover, a.prover_timeout),
                      OpenShellCLI(a.openshell, a.state / "logs", image=a.image),
                      BoardRegistrar(a.board_admin_url, a.board_admin_token_file.read_text().strip()),
                      ApprovalClient(a.board_admin_url, a.board_admin_token_file.read_text().strip()))

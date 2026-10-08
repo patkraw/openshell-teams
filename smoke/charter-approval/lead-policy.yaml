@@ -1,0 +1,18 @@
+# The lead: board (rules from its role), Spawn Gate, the model. No GitHub, nothing writable but /tmp.
+version: 1
+filesystem_policy:
+  include_workdir: true
+  read_only: [/usr, /lib, /etc, /var/log, /proc, /dev/urandom]
+  read_write: [/tmp, /dev/null]
+network_policies:
+  spawn:
+    name: spawn
+    endpoints:
+      - host: host.openshell.internal
+        port: 8766
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: POST, path: "/v1/agents" }
+          - allow: { method: GET, path: "/v1/teams/**" }
+    binaries: [{ path: /usr/local/lib/openworker/venv/bin/python }]
