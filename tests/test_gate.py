@@ -215,3 +215,10 @@ def test_default_providers_come_from_the_runtime(world):
     req = worker(providers=())
     gate.admit(req, lead)
     assert req.providers == ["anthropic"]
+
+
+def test_the_admitted_grant_is_recorded_for_audit(world):
+    import json as _json
+    gate, reg, os_, _, lead = world
+    gate.admit(worker(), lead)
+    assert _json.loads(reg.get("reviewer")["grant_json"]) == os_.created["reviewer"]

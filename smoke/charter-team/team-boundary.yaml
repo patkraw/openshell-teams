@@ -1,0 +1,42 @@
+# Team boundary for a real-model team in OpenWorker's image.
+policy:
+  version: 1
+  filesystem_policy:
+    include_workdir: true
+    read_only: [/usr, /lib, /etc, /var/log, /proc, /dev/urandom]
+    read_write: [/tmp, /dev/null]
+  landlock: { compatibility: hard_requirement }
+  process: { run_as_user: "1000", run_as_group: "1000" }
+  network_policies:
+    board:
+      name: board
+      endpoints:
+        - host: host.openshell.internal
+          port: 8765
+          protocol: rest
+          enforcement: enforce
+          rules:
+            - allow: { method: "*", path: "/v1/board/**" }
+      binaries: [{ path: /usr/local/lib/openworker/venv/bin/python }]
+    spawn:
+      name: spawn
+      endpoints:
+        - host: host.openshell.internal
+          port: 8766
+          protocol: rest
+          enforcement: enforce
+          rules:
+            - allow: { method: POST, path: "/v1/agents" }
+            - allow: { method: GET, path: "/v1/teams/**" }
+      binaries: [{ path: /usr/local/lib/openworker/venv/bin/python }]
+    inference:
+      name: inference
+      endpoints:
+        - host: inference-api.nvidia.com
+          port: 443
+          protocol: rest
+          access: read-write
+          enforcement: enforce
+      binaries: [{ path: /usr/local/lib/openworker/venv/bin/python }]
+credentials: [openworker-nvidia]
+limits: { max_workers: 2, max_depth: 1 }

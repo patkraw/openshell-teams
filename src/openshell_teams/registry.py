@@ -32,7 +32,7 @@ class Registry:
                 id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, team TEXT NOT NULL, role TEXT NOT NULL, parent TEXT,
                 caller TEXT NOT NULL, request_id TEXT NOT NULL, digest TEXT NOT NULL,
                 counts INTEGER NOT NULL, state TEXT NOT NULL, sandbox_id TEXT, generation TEXT,
-                grant_hash TEXT, created_at REAL NOT NULL,
+                grant_hash TEXT, grant_json TEXT, created_at REAL NOT NULL,
                 UNIQUE (team, caller, request_id));
         """)
 
