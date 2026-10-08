@@ -9,6 +9,7 @@ from concurrent import futures
 from pathlib import Path
 
 import grpc
+import jwt
 
 from . import passport
 from .gen import extension_pb2 as ext
@@ -53,8 +54,13 @@ class PassportMiddleware(pb_grpc.SupervisorMiddlewareServicer):
         audience = passport.audience_for(request.target.host, request.target.port)
         token = passport.sign(self.keys.private, sandbox_id=sandbox_id,
                               sandbox=request.context.sandbox, audience=audience)
-        log.info("passport for sandbox=%s name=%s host=%s", sandbox_id, request.context.sandbox,
-                 request.target.host)
+        claims = jwt.decode(token, options={"verify_signature": False})
+        forged = next((h.value for h in request.headers if h.name == passport.HEADER.lower()), None)
+        log.info("passport %s -> %s %s:%s%s | token %s…%s claims name=%s sbx=%s… aud=%s iat=%s exp=+%ss%s",
+                 request.context.sandbox, request.target.method, request.target.host, request.target.port,
+                 request.target.path, token[:12], token[-6:], claims.get("name"), str(claims.get("sbx"))[:8],
+                 claims.get("aud"), claims.get("iat"), claims.get("exp", 0) - claims.get("iat", 0),
+                 f" | FORGED HEADER from the agent overwritten (it sent {forged[:24]!r})" if forged else "")
         return pb.HttpRequestResult(
             decision=pb.DECISION_ALLOW,
             header_mutations=[pb.HeaderMutation(write=pb.WriteHeader(

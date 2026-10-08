@@ -102,8 +102,55 @@ def board_timeline() -> None:
         print(f"  #{seq:<4} {actor:9} {kind:18} item {item or '-':<3} {text[:150]}")
 
 
+def _entries(net: dict, indent: str = "      ") -> None:
+    for name, body in sorted((net or {}).items()):
+        for e in body.get("endpoints", []):
+            rules = [f"{r['allow'].get('method')} {r['allow'].get('path')}" for r in e.get("rules", [])]
+            print(f"{indent}network {name:28} {e['host']}:{e.get('port') or e.get('ports')}"
+                  f"  {e.get('protocol') or 'tcp'}  {'rules: ' + ', '.join(rules) if rules else 'all requests'}")
+        print(f"{indent}{'':8}{'':28} used by: {', '.join(b['path'] for b in body.get('binaries', [])) or 'any binary'}")
+
+
+def show_team() -> None:
+    """The user's files for this team: the boundary, and the board rights of each role."""
+    import yaml
+    d = HERE / "charter-demo"
+    boundary = yaml.safe_load((d / "team-boundary.yaml").read_text())
+    access = yaml.safe_load((d / "access-rules.yaml").read_text())["roles"]
+    actions = yaml.safe_load((d / "endpoint-map.yaml").read_text())["actions"]
+    pol = boundary["policy"]
+    print("\n=== TEAM BOUNDARY (the most any agent on this team may have) ===")
+    _entries(pol.get("network_policies"))
+    fs = pol.get("filesystem_policy", {})
+    print(f"      files    writable {fs.get('read_write')}, read-only {fs.get('read_only')}")
+    print(f"      process  {pol.get('process')}, landlock {pol.get('landlock')}")
+    print(f"      keys     {boundary.get('credentials')}   limits {boundary.get('limits')}   "
+          f"lead-only entries {boundary.get('lead_only', ['spawn'])}")
+    print("\n=== BOARD RIGHTS PER ROLE (Channel Guard compiles these into each agent's policy) ===")
+    for role, rights in access.items():
+        print(f"  {role}:")
+        for a in rights:
+            kind = "read " if actions[a]["method"] == "GET" else "write"
+            print(f"      {kind} {a:8} {actions[a]['method']:4} {actions[a]['path']}")
+
+
+def show_grants() -> None:
+    """What Spawn Gate admitted for each agent: the policy its sandbox enforces."""
+    import sqlite3
+    db = sqlite3.connect(f"file:{STATE / 'gate' / 'registry.db'}?mode=ro", uri=True)
+    print("\n=== ADMITTED POLICIES (proved, launched and enforced by each sandbox) ===")
+    for name, role, grant, providers, sid in db.execute(
+            "SELECT name, role, grant_json, providers, sandbox_id FROM agents a WHERE team=? AND grant_json IS NOT NULL"
+            " AND id=(SELECT MAX(id) FROM agents b WHERE b.name=a.name AND b.team=a.team) ORDER BY id", (TEAM,)):
+        g = json.loads(grant)
+        print(f"  {name} ({role}), sandbox {str(sid)[:8]}…, keys {providers or '-'}, "
+              f"identity middleware {sorted(g.get('network_middlewares') or {})}")
+        _entries(g.get("network_policies"))
+
+
 def main() -> None:
     op = (STATE / "operator.token").read_text().strip()
+    show_team()
     r = httpx.post(f"{GATE}/v1/teams", headers={"X-Operator-Token": op}, timeout=900, json={
         "team": TEAM, "charter_dir": str(HERE / "charter-demo"), "lead_name": "lead",
         "lead_persona": "swe-lead", "request_id": f"team-{uuid.uuid4()}"})
@@ -122,14 +169,12 @@ def main() -> None:
         return [p for p in ps if p["space"] == TEAM and p["state"] == "pending"]
 
     proposal = wait("the lead's proposal", pending)[0]
-    print("\n=== APPROVAL CARD (what the user approves) ===")
+    print("\n=== APPROVAL CARD: the policies the lead AI proposed (the user approves these) ===")
     for w in proposal["workers"]:
-        net = w["policy"].get("network_policies") or {}
-        print(f"  {w['name']}  persona={w['persona']}  providers={w.get('providers') or []}")
-        for entry, body in sorted(net.items()):
-            hosts = ", ".join(f"{e['host']}:{e.get('port')}" for e in body.get("endpoints", []))
-            print(f"      network {entry:10} -> {hosts}")
-        print(f"      writable  {w['policy'].get('filesystem_policy', {}).get('read_write')}")
+        print(f"  {w['name']}  persona={w['persona']}  role={w.get('role')}  keys={w.get('providers') or []}")
+        _entries(w["policy"].get("network_policies"))
+        print(f"      files    writable {w['policy'].get('filesystem_policy', {}).get('read_write')}")
+        print(f"      board    (none proposed: Channel Guard adds the '{w.get('role')}' rights above)")
     httpx.post(f"{BOARD}/v1/team-proposals/{proposal['id']}/decide", headers=app, timeout=10,
                json={"approve": True}).raise_for_status()
     httpx.post(f"{BOARD}/v1/board/items/comment", headers=user, timeout=30, json={
@@ -150,6 +195,7 @@ def main() -> None:
         return next((i for i in items() if i.get("assignee") == "patcher"), None)
 
     patch = wait("the patch item", patch_item)
+    show_grants()
 
     def verdict():
         cs = comments(patch["id"])

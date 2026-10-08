@@ -119,6 +119,27 @@ class SpawnGate:
         return policy.with_passport(safe, board_host=charter.board.host)
 
     # -- step 4: check ----------------------------------------------------------------
+    def _describe(self, req: AgentRequest, grant: dict, role: str, charter: TeamCharter) -> None:
+        """Log what admission turned the request into: one line per network entry, the
+        board rules Channel Guard compiled, files, process and providers."""
+        proposed = sorted(((req.policy or {}).get("network_policies") or {}) if req.kind != "lead"
+                          else (charter.lead_policy.get("network_policies") or {}))
+        nets = grant.get("network_policies", {})
+        dropped = [n for n in proposed if n not in nets]
+        log.info("step %s: resolved grant for role %s (proposed entries %s%s)", req.name, role, proposed or "-",
+                 f"; Channel Guard replaced {dropped}" if dropped else "")
+        for name, entry in sorted(nets.items()):
+            for e in entry.get("endpoints", []):
+                rules = [f"{r['allow'].get('method')} {r['allow'].get('path')}" for r in e.get("rules", [])]
+                log.info("step %s:   network %-10s %s:%s %s%s binaries=%s", req.name, name, e.get("host"),
+                         e.get("port") or e.get("ports"), e.get("protocol") or "tcp",
+                         f" rules={rules}" if rules else "", [b["path"] for b in entry.get("binaries", [])])
+        fs = grant.get("filesystem_policy", {})
+        log.info("step %s:   files writable=%s read-only=%s workdir=%s; process=%s; landlock=%s; middleware=%s; "
+                 "providers=%s", req.name, fs.get("read_write"), fs.get("read_only"), fs.get("include_workdir"),
+                 grant.get("process"), (grant.get("landlock") or {}).get("compatibility"),
+                 sorted(grant.get("network_middlewares") or {}), req.providers or "-")
+
     def _ceiling(self, role: str, charter: TeamCharter) -> dict:
         """The most an agent in `role` may have, with the team's fixed middleware."""
         ceiling = channel_guard.role_ceiling(role, charter.boundary, charter.access_rules, charter.endpoint_map,
@@ -130,9 +151,15 @@ class SpawnGate:
         provable, _ = policy.split(candidate)
         ceiling_provable, _ = policy.split(ceiling)
         started = time.monotonic()
-        verdict, _detail = self.prover.check(provable, ceiling_provable)
-        log.info("step %s: prover says %s in %.1fs (entries: %s)", label, verdict, time.monotonic() - started,
-                 ", ".join(sorted(provable.get("network_policies", {}))))
+        try:
+            verdict, detail = self.prover.check(provable, ceiling_provable, label=label)
+        except TypeError:   # test doubles without a label parameter
+            verdict, detail = self.prover.check(provable, ceiling_provable)
+        coverage = next((l.strip() for l in str(detail).splitlines() if "coverage" in l), "")
+        log.info("step %s: prover says %s in %.3fs; candidate entries [%s], ceiling entries [%s] %s%s", label,
+                 verdict, time.monotonic() - started, ", ".join(sorted(provable.get("network_policies", {}))),
+                 ", ".join(sorted(ceiling_provable.get("network_policies", {}))), coverage,
+                 f"; inputs in {getattr(self.prover, 'last_saved', '')}" if getattr(self.prover, "last_saved", "") else "")
         return verdict
 
     def _check(self, grant: dict, req: AgentRequest, role: str, charter: TeamCharter) -> None:
@@ -208,11 +235,15 @@ class SpawnGate:
             # An approved worker gets exactly the providers the user approved.
             req.providers = list(charter.default_providers)
         grant = self._resolve(req, charter)
+        self._describe(req, grant, role, charter)
         self._check(grant, req, role, charter)
         self._step(req.name, "reserved", "creating", providers=",".join(req.providers),
                    grant_hash=grant_hash(grant), grant_json=json.dumps(grant, sort_keys=True))
+        started = time.monotonic()
         sandbox = self.openshell.create(req.name, grant, providers=req.providers,
                                         labels={"team": req.team, "role": role})
+        log.info("step %s: sandbox %s ready in %.3fs (generation %s)", req.name, sandbox["id"],
+                 time.monotonic() - started, sandbox.get("generation"))
         self._step(req.name, "creating", "created", sandbox_id=sandbox["id"],
                    generation=sandbox.get("generation"))
         # Launched = checked: the policy OpenShell runs must equal the admitted grant,
@@ -223,7 +254,9 @@ class SpawnGate:
         if differences:
             raise Rejected("launched policy differs from the admitted grant: " + "; ".join(differences),
                            "launch_check")
-        log.info("step %s: launched policy equals the admitted grant", req.name)
+        added = sorted(set(launched.get("network_policies", {})) - set(grant.get("network_policies", {})))
+        log.info("step %s: launched policy equals the admitted grant%s", req.name,
+                 f" (OpenShell added provider entries {added})" if added else "")
         verdict = self._prove(launched, self._ceiling(role, charter), label=f"{req.name} launched vs {role} ceiling")
         if verdict != "within_boundary":
             raise Rejected(f"launched policy is not within the boundary: {verdict}", "launch_check")
@@ -231,6 +264,7 @@ class SpawnGate:
         self._step(req.name, "created", "registered")
         self._step(req.name, "registered", "starting")
         if req.command:
+            log.info("step %s: starting %s", req.name, " ".join(req.command))
             self.openshell.start(req.name, req.command)
         self._step(req.name, "starting", "running")
         return {**self.registry.get(req.name), "retry": False}
@@ -249,6 +283,7 @@ class SpawnGate:
             return False
 
     def _abandon(self, name: str, code: str, reason: str) -> None:
+        log.info("step %s: refused (%s): %s", name, code, reason[:300])
         state = (self.registry.get(name) or {}).get("state")
         needs_delete = state not in ("reserved",)
         if needs_delete and not self._remove(name):
@@ -263,8 +298,13 @@ class SpawnGate:
         """Children first. Each agent loses its board identity, then its sandbox. An agent
         still being admitted is marked stopping, so its admission cleans up after itself."""
         order = self.registry.begin_stop(name)
+        log.info("stop %s: order %s (children first)", name, order)
         for n in order:
             if self.registry.get(n).get("state") != "stopping":
                 continue
-            self.registry.update(n, state="stopped" if self._remove(n) else "cleanup_failed")
+            started = time.monotonic()
+            ok = self._remove(n)
+            self.registry.update(n, state="stopped" if ok else "cleanup_failed")
+            log.info("stop %s: %s in %.3fs", n, "identity revoked, sandbox deleted" if ok else "CLEANUP FAILED",
+                     time.monotonic() - started)
         return order

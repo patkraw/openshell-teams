@@ -66,6 +66,10 @@ def create_app(gate: SpawnGate, public_key, audience: str, operator_token: str) 
         return Caller("agent", claims.get("name"), claims["sbx"])
 
     def run(req: AgentRequest, caller: Caller) -> dict:
+        nets = sorted((req.policy or {}).get("network_policies", {}) or {})
+        log.info("request %s from %s: kind=%s role=%s persona=%s providers=%s approval=%s request_id=%s "
+                 "proposed network=%s", req.name, caller.name or caller.kind, req.kind, req.role, req.persona or "-",
+                 req.providers or "-", (req.approval_id[:8] + "…") if req.approval_id else "-", req.request_id, nets or "-")
         try:
             row = gate.admit(req, caller)
         except Rejected as error:
@@ -144,7 +148,8 @@ def main() -> None:
     a = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     a.state.mkdir(parents=True, exist_ok=True)
-    gate = SpawnGate({}, Registry(a.state / "registry.db"), Prover(a.prover, a.prover_timeout),
+    gate = SpawnGate({}, Registry(a.state / "registry.db"),
+                     Prover(a.prover, a.prover_timeout, keep_dir=a.state / "proofs"),
                      OpenShellCLI(a.openshell, a.state / "logs", image=a.image),
                      BoardRegistrar(a.board_admin_url, a.board_admin_token_file.read_text().strip()),
                      ApprovalClient(a.board_admin_url, a.board_admin_token_file.read_text().strip()))

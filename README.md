@@ -67,7 +67,7 @@ differs.
    scripts/up.sh
    ```
 
-7. **Run the demo** (about 10 minutes; the prover takes up to a minute per agent):
+7. **Run the demo** (about 10 minutes, mostly creating sandboxes and the agents' model turns; each prover check takes well under a second):
    ```sh
    uv run python smoke/run_demo_team.py
    ```
