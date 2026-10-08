@@ -28,5 +28,14 @@ policy:
           rules:
             - allow: { method: POST, path: "/v1/agents" }
       binaries: [{ path: /usr/bin/bash }]
-credentials: [openworker-anthropic]
+    inference:
+      name: inference
+      endpoints:
+        - host: inference-api.nvidia.com
+          port: 443
+          protocol: rest
+          access: read-write
+          enforcement: enforce
+      binaries: [{ path: /usr/local/lib/openworker/venv/bin/python }]
+credentials: [openworker-nvidia]
 limits: { max_workers: 2, max_depth: 1 }

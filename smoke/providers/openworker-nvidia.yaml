@@ -1,0 +1,25 @@
+# OpenShell provider profile: OpenWorker with NVIDIA's OpenAI-compatible inference API.
+# The key stays in OpenShell; inside the sandbox OPENAI_API_KEY holds only a placeholder,
+# and OpenShell adds the real key to requests to inference-api.nvidia.com from OpenWorker's
+# Python, and nowhere else.
+id: openworker-nvidia
+display_name: OpenWorker (NVIDIA inference API)
+description: OpenWorker CLI with models from inference-api.nvidia.com
+category: agent
+inference_capable: true
+credentials:
+  - name: api_key
+    description: NVIDIA inference API key
+    env_vars: [OPENAI_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [api_key]
+endpoints:
+  - host: inference-api.nvidia.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries: [/usr/local/lib/openworker/venv/bin/python]
