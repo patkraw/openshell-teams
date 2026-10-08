@@ -9,6 +9,9 @@ from openshell_teams.registry import Registry, LimitReached, RequestIdReused
 def reg(tmp_path):
     r = Registry(tmp_path / "registry.db")
     r.add_team("t1", max_workers=2)
+    # workers are reserved under a running lead
+    r.reserve("t1", caller="op", request_id="lead", digest="dl", name="lead", role="lead", parent=None, counts=False)
+    r.update("lead", state="running")
     return r
 
 
@@ -50,12 +53,11 @@ def test_reusing_a_request_id_for_a_different_request_is_an_error(reg):
 
 def test_request_ids_are_scoped_to_the_caller(reg):
     reg.reserve("t1", caller="lead", request_id="a", digest="d1", name="w1", role="worker", parent="lead")
-    other = reg.reserve("t1", caller="lead-2", request_id="a", digest="d9", name="w2", role="worker", parent="lead-2")
+    other = reg.reserve("t1", caller="lead-2", request_id="a", digest="d9", name="w2", role="worker", parent="lead")
     assert other["name"] == "w2" and other["retry"] is False
 
 
 def test_stopping_a_parent_marks_it_stopping_and_lists_children_first(reg):
-    reg.reserve("t1", caller="op", request_id="l", digest="dl", name="lead", role="lead", parent=None, counts=False)
     reg.reserve("t1", caller="lead", request_id="a", digest="d1", name="w1", role="worker", parent="lead")
     order = reg.begin_stop("lead")
     assert order == ["w1", "lead"]
@@ -76,3 +78,36 @@ def test_two_live_agents_cannot_share_a_name(reg):
     reg.reserve("t1", caller="lead", request_id="a", digest="d1", name="w1", role="worker", parent="lead")
     with pytest.raises(NameInUse):
         reg.reserve("t1", caller="lead", request_id="b", digest="d2", name="w1", role="worker", parent="lead")
+
+
+def test_reserving_under_a_parent_that_is_not_running_is_refused(reg):
+    """Review finding 6: the parent's state was checked outside the reservation."""
+    from openshell_teams.registry import ParentNotRunning
+    reg.begin_stop("lead")
+    with pytest.raises(ParentNotRunning):
+        reg.reserve("t1", caller="sb", request_id="w", digest="d", name="w", role="worker", parent="lead")
+
+
+def test_transitions_are_conditional(reg):
+    reg.reserve("t1", caller="op", request_id="1", digest="d", name="a", role="worker", parent=None)
+    assert reg.transition("a", ("reserved",), "creating")
+    assert not reg.transition("a", ("reserved",), "creating")
+    reg.begin_stop("a")
+    assert not reg.transition("a", ("creating",), "created")
+    assert reg.get("a")["state"] == "stopping"
+
+
+def test_stop_reaches_children_that_are_still_being_created(reg):
+    reg.reserve("t1", caller="sb", request_id="w", digest="d", name="w", role="worker", parent="lead")
+    reg.transition("w", ("reserved",), "creating")
+    assert reg.begin_stop("lead") == ["w", "lead"]
+
+
+def test_a_rejected_admission_is_remembered_for_retries(reg):
+    """Review finding 13: a retry returned the stopped record as if it had succeeded."""
+    reg.reserve("t1", caller="sb", request_id="r1", digest="d", name="w", role="worker", parent=None)
+    reg.reject("w", "approval_required", "needs approval")
+    again = reg.reserve("t1", caller="sb", request_id="r1", digest="d", name="w", role="worker", parent=None)
+    assert again["retry"] and again["error_code"] == "approval_required"
+    # a rejected agent holds neither its name nor a slot
+    reg.reserve("t1", caller="sb", request_id="r2", digest="e", name="w", role="worker", parent=None)

@@ -17,8 +17,20 @@ class RequestIdReused(Exception):
     pass
 
 
+class ParentNotRunning(Exception):
+    pass
+
+
 class NameInUse(Exception):
     pass
+
+
+# Agent lifecycle. Admission moves an agent forward with conditional transitions
+# (reserved -> creating -> created -> registered -> starting -> running); a stop marks it
+# `stopping`, so an in-flight admission's next transition fails and it cleans up. Terminal:
+# `stopped`, `rejected` (admission refused; the outcome is kept for retries), and
+# `cleanup_failed` (its sandbox may still exist; it stays locked).
+DONE = ("stopped", "rejected")
 
 
 class Registry:
@@ -36,8 +48,9 @@ class Registry:
                 UNIQUE (team, caller, request_id));
         """)
         cols = {r["name"] for r in self._db.execute("PRAGMA table_info(agents)")}
-        if "providers" not in cols:  # comma-separated; read by Policy Lock
-            self._db.execute("ALTER TABLE agents ADD COLUMN providers TEXT")
+        for col in ("providers", "error_code", "error_reason"):  # providers: comma-separated, read by Policy Lock
+            if col not in cols:
+                self._db.execute(f"ALTER TABLE agents ADD COLUMN {col} TEXT")
 
     def add_team(self, team: str, *, max_workers: int) -> None:
         with self._lock:
@@ -55,15 +68,22 @@ class Registry:
                         raise RequestIdReused(request_id)
                     self._db.execute("COMMIT")
                     return {**dict(row), "retry": True}
+                if parent is not None:
+                    # Checked in the same transaction as the reservation, so a stop cannot
+                    # slip in between.
+                    prow = self._db.execute("SELECT state FROM agents WHERE name=? ORDER BY id DESC LIMIT 1",
+                                            (parent,)).fetchone()
+                    if not prow or prow["state"] != "running":
+                        raise ParentNotRunning(parent)
                 live = self._db.execute(
-                    "SELECT 1 FROM agents WHERE name=? AND state != 'stopped'", (name,)).fetchone()
+                    "SELECT 1 FROM agents WHERE name=? AND state NOT IN (?, ?)", (name, *DONE)).fetchone()
                 if live:
                     raise NameInUse(name)
                 if counts:
                     (limit,) = self._db.execute("SELECT max_workers FROM teams WHERE team=?", (team,)).fetchone()
                     (used,) = self._db.execute(
-                        "SELECT COUNT(*) FROM agents WHERE team=? AND counts=1 AND state != 'stopped'",
-                        (team,)).fetchone()
+                        "SELECT COUNT(*) FROM agents WHERE team=? AND counts=1 AND state NOT IN (?, ?)",
+                        (team, *DONE)).fetchone()
                     if used >= limit:
                         raise LimitReached(f"team {team} has {used} of {limit} workers")
                 self._db.execute(
@@ -75,6 +95,19 @@ class Registry:
                 self._db.execute("ROLLBACK")
                 raise
             return {**self.get(name), "retry": False}
+
+    def transition(self, name: str, from_states, to_state: str, **fields) -> bool:
+        """Move the newest record for `name` to `to_state` only if it is in `from_states`."""
+        sets = ", ".join(["state=?", *(f"{k}=?" for k in fields)])
+        marks = ", ".join("?" for _ in from_states)
+        with self._lock:
+            cur = self._db.execute(
+                f"UPDATE agents SET {sets} WHERE id=(SELECT MAX(id) FROM agents WHERE name=?) AND state IN ({marks})",
+                (to_state, *fields.values(), name, *from_states))
+            return cur.rowcount == 1
+
+    def reject(self, name: str, code: str, reason: str) -> None:
+        self.update(name, state="rejected", error_code=code, error_reason=reason)
 
     def update(self, name: str, **fields) -> None:
         """Update the newest record for `name`."""
@@ -98,11 +131,12 @@ class Registry:
 
     def children(self, name: str) -> list[str]:
         return [r["name"] for r in self._db.execute(
-            "SELECT name FROM agents WHERE parent=? AND state != 'stopped' ORDER BY id", (name,))]
+            "SELECT name FROM agents a WHERE parent=? AND state NOT IN (?, ?) AND "
+            "id=(SELECT MAX(id) FROM agents b WHERE b.name=a.name) ORDER BY id", (name, *DONE))]
 
     def is_stopping(self, name: str) -> bool:
         row = self.get(name)
-        return bool(row and row["state"] in ("stopping", "stopped"))
+        return bool(row and row["state"] in ("stopping", "stopped", "cleanup_failed"))
 
     def begin_stop(self, name: str) -> list[str]:
         """Mark `name` and its descendants stopping; return the stop order, children first."""
@@ -115,5 +149,6 @@ class Registry:
 
         visit(name)
         for n in order:
-            self.update(n, state="stopping")
+            self.transition(n, ("reserved", "creating", "created", "registered", "starting", "running"),
+                            "stopping")
         return order

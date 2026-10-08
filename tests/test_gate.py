@@ -130,7 +130,7 @@ def test_policy_outside_the_boundary_is_rejected_and_nothing_is_created(world):
         gate.admit(worker(policy=outside), lead)
     assert e.value.code == "prover_exceeds_boundary"
     assert "reviewer" not in os_.created
-    assert reg.get("reviewer")["state"] == "stopped"
+    assert reg.get("reviewer")["state"] == "rejected"
 
 
 def test_provider_outside_the_boundary_is_rejected(world):
@@ -361,3 +361,94 @@ def test_real_prover_refuses_an_equivalent_board_selector_with_wider_rules():
         "rules": [{"allow": {"method": "*", "path": "/v1/board/**"}}]}],
         "binaries": [{"path": "/usr/bin/python3"}]}
     assert Prover(PROVER, 90).check(sneaky, ceiling)[0] == "exceeds_boundary"
+
+
+# --- review findings: lifecycle --------------------------------------------------------------
+
+def test_stop_during_creation_leaves_no_running_worker(world):
+    """Review finding 6: a worker could start after its lead was stopped."""
+    gate, reg, os_, board, lead = world
+    real_create = os_.create
+
+    def create_while_stopping(name, grant, providers, labels):
+        result = real_create(name, grant, providers, labels)
+        gate.stop("lead")
+        return result
+    os_.create = create_while_stopping
+    with pytest.raises(Rejected) as e:
+        gate.admit(worker(), lead)
+    assert e.value.code == "parent_stopping"
+    assert "reviewer" not in os_.started and "reviewer" in os_.deleted
+    assert reg.get("reviewer")["state"] in ("stopped", "rejected")
+    assert "sb-reviewer" not in board.registered
+
+
+def test_stop_between_authorize_and_reserve_refuses_the_worker(world):
+    gate, reg, os_, _, lead = world
+    real_reserve = reg.reserve
+
+    def reserve_after_stop(*a, **kw):
+        gate.stop("lead")
+        return real_reserve(*a, **kw)
+    reg.reserve = reserve_after_stop
+    with pytest.raises(Rejected) as e:
+        gate.admit(worker(), lead)
+    assert e.value.code == "parent_stopping" and "reviewer" not in os_.created
+
+
+def test_a_sandbox_that_never_became_ready_is_still_deleted(world):
+    """Review finding 9: without a recorded sandbox id, cleanup skipped the delete."""
+    gate, reg, os_, _, lead = world
+
+    def create_then_fail(name, grant, providers, labels):
+        os_.created[name] = grant
+        raise RuntimeError("not ready in time")
+    os_.create = create_then_fail
+    with pytest.raises(Rejected):
+        gate.admit(worker(), lead)
+    assert "reviewer" in os_.deleted and reg.get("reviewer")["state"] == "rejected"
+
+
+def test_a_failed_delete_is_not_reported_as_stopped(world):
+    gate, reg, os_, _, lead = world
+    gate.admit(worker(), lead)
+
+    def failing_delete(name):
+        raise RuntimeError("gateway unavailable")
+    os_.delete = failing_delete
+    gate.stop("lead")
+    assert reg.get("reviewer")["state"] == "cleanup_failed"
+
+
+def test_a_failed_start_is_cleaned_up(world):
+    """Review finding 18: a failed launch still left the agent 'running'."""
+    gate, reg, os_, board, lead = world
+
+    def failing_start(name, command):
+        raise RuntimeError("exec failed")
+    os_.start = failing_start
+    with pytest.raises(Rejected):
+        gate.admit(worker(), lead)
+    assert reg.get("reviewer")["state"] == "rejected" and "reviewer" in os_.deleted
+    assert "sb-reviewer" not in board.registered
+
+
+def test_a_retry_of_a_rejected_request_is_rejected_again(world):
+    """Review finding 13."""
+    gate, _, _, _, lead = world
+    gate.charters["t1"].require_approval = True
+    for _ in range(2):
+        with pytest.raises(Rejected) as e:
+            gate.admit(worker(), lead)
+        assert e.value.code == "approval_required"
+
+
+def test_the_request_id_covers_the_persona(world):
+    """Review finding 13: changing the persona passed the digest comparison."""
+    gate, _, _, _, lead = world
+    gate.admit(worker(), lead)
+    changed = worker()
+    changed.persona = "swe-worker"
+    with pytest.raises(Rejected) as e:
+        gate.admit(changed, lead)
+    assert e.value.code == "request_id_reused"

@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 from . import channel_guard, policy
 from .charter import TeamCharter
-from .registry import LimitReached, NameInUse, Registry, RequestIdReused
+from .registry import LimitReached, NameInUse, ParentNotRunning, Registry, RequestIdReused
 
 log = logging.getLogger(__name__)
 
@@ -48,9 +48,11 @@ class AgentRequest:
     approval_id: str = ""                              # the user's approval, when the team requires one
 
     def digest(self) -> str:
-        body = json.dumps({"name": self.name, "role": self.role, "policy": self.policy,
-                           "providers": sorted(self.providers), "task": self.task,
-                           "kind": self.kind}, sort_keys=True)
+        """Identity of the request for retries: every field that changes what would run."""
+        body = json.dumps({"team": self.team, "name": self.name, "role": self.role, "policy": self.policy,
+                           "providers": sorted(self.providers), "task": self.task, "kind": self.kind,
+                           "command": self.command, "persona": self.persona,
+                           "approval_id": self.approval_id}, sort_keys=True)
         return hashlib.sha256(body.encode()).hexdigest()
 
 
@@ -159,77 +161,101 @@ class SpawnGate:
             raise Rejected("request ID reused for a different request", "request_id_reused") from error
         except NameInUse as error:
             raise Rejected(f"an agent named {req.name!r} is already running", "name_in_use") from error
+        except ParentNotRunning as error:
+            raise Rejected("the requesting agent is stopping", "parent_stopping") from error
         if slot["retry"]:
+            if slot.get("error_code"):
+                # The same request was refused before: refuse it the same way again.
+                raise Rejected(slot["error_reason"] or "", slot["error_code"])
             return slot
+        try:
+            return self._admit_reserved(req, slot, parent, charter)
+        except Rejected as error:
+            self._abandon(req.name, error.code, error.reason)
+            raise
+        except Exception as error:
+            self._abandon(req.name, "creation_failed", str(error))
+            raise Rejected(f"creation failed: {error}", "creation_failed") from error
+
+    def _step(self, name: str, from_state: str, to_state: str, **fields) -> None:
+        """Advance one step, unless a stop got there first."""
+        if not self.registry.transition(name, (from_state,), to_state, **fields):
+            raise Rejected("stopped while being created", "parent_stopping")
+
+    def _admit_reserved(self, req: AgentRequest, slot: dict, parent: str, charter: TeamCharter) -> dict:
         if charter.require_approval and req.kind == "staffing":
             # Before anything is resolved or defaulted: the digest covers exactly what was sent.
+            if not req.approval_id or self.approvals is None:
+                raise Rejected("this team requires the user's approval for each worker", "approval_required")
             try:
-                if not req.approval_id or self.approvals is None:
-                    raise Rejected("this team requires the user's approval for each worker", "approval_required")
                 self.approvals.consume(req.approval_id, team=req.team, lead=parent, worker=req.name,
                                        digest=approval_digest(req))
-            except Rejected:
-                self.registry.update(req.name, state="stopped")
-                raise
             except Exception as error:
-                self.registry.update(req.name, state="stopped")
                 raise Rejected(f"approval refused: {error}", "approval_refused") from error
         role = slot["role"]
-        if charter.runtime_command and (caller.kind == "agent" or not req.command):
+        if charter.runtime_command and (req.kind != "lead" or not req.command):
             # Agents never choose what runs in a sandbox: the team's runtime decides.
             req.command = charter.command_for(name=req.name, persona=req.persona, role=role)
         if not req.providers and not (charter.require_approval and req.kind == "staffing"):
             # An approved worker gets exactly the providers the user approved.
             req.providers = list(charter.default_providers)
-        try:
-            grant = self._resolve(req, charter)
-            self._check(grant, req, role, charter)
-            sandbox = self.openshell.create(req.name, grant, providers=req.providers,
-                                            labels={"team": req.team, "role": slot["role"]})
-            self.registry.update(req.name, state="created", sandbox_id=sandbox["id"],
-                                 generation=sandbox.get("generation"), grant_hash=grant_hash(grant),
-                                 grant_json=json.dumps(grant, sort_keys=True),
-                                 providers=",".join(req.providers))
-            # Launched = checked: the policy OpenShell runs must equal the admitted grant,
-            # apart from what OpenShell itself adds for attached providers, and those
-            # additions must still be within the role's ceiling.
-            launched = self.openshell.effective_policy(req.name)
-            differences = policy.launch_differences(grant, launched, providers=req.providers)
-            if differences:
-                raise Rejected("launched policy differs from the admitted grant: " + "; ".join(differences),
-                               "launch_check")
-            verdict = self._prove(launched, self._ceiling(role, charter))
-            if verdict != "within_boundary":
-                raise Rejected(f"launched policy is not within the boundary: {verdict}", "launch_check")
-            self.board.register(sandbox_id=sandbox["id"], team=req.team, name=req.name, role=slot["role"])
-            self.registry.update(req.name, state="registered")
-            if req.command:
-                self.openshell.start(req.name, req.command)
-            self.registry.update(req.name, state="running")
-        except Rejected:
-            self._abandon(req.name)
-            raise
-        except Exception as error:
-            self._abandon(req.name)
-            raise Rejected(f"creation failed: {error}", "creation_failed") from error
+        grant = self._resolve(req, charter)
+        self._check(grant, req, role, charter)
+        self._step(req.name, "reserved", "creating", providers=",".join(req.providers),
+                   grant_hash=grant_hash(grant), grant_json=json.dumps(grant, sort_keys=True))
+        sandbox = self.openshell.create(req.name, grant, providers=req.providers,
+                                        labels={"team": req.team, "role": role})
+        self._step(req.name, "creating", "created", sandbox_id=sandbox["id"],
+                   generation=sandbox.get("generation"))
+        # Launched = checked: the policy OpenShell runs must equal the admitted grant,
+        # apart from what OpenShell itself adds for attached providers, and those
+        # additions must still be within the role's ceiling.
+        launched = self.openshell.effective_policy(req.name)
+        differences = policy.launch_differences(grant, launched, providers=req.providers)
+        if differences:
+            raise Rejected("launched policy differs from the admitted grant: " + "; ".join(differences),
+                           "launch_check")
+        verdict = self._prove(launched, self._ceiling(role, charter))
+        if verdict != "within_boundary":
+            raise Rejected(f"launched policy is not within the boundary: {verdict}", "launch_check")
+        self.board.register(sandbox_id=sandbox["id"], team=req.team, name=req.name, role=role)
+        self._step(req.name, "created", "registered")
+        self._step(req.name, "registered", "starting")
+        if req.command:
+            self.openshell.start(req.name, req.command)
+        self._step(req.name, "starting", "running")
         return {**self.registry.get(req.name), "retry": False}
 
-    def _abandon(self, name: str) -> None:
-        row = self.registry.get(name)
-        if row and row.get("sandbox_id"):
-            try:
+    def _remove(self, name: str) -> bool:
+        """Take an agent's identity away, then its sandbox. True when both are gone."""
+        row = self.registry.get(name) or {}
+        try:
+            if row.get("sandbox_id"):
                 self.board.deregister(sandbox_id=row["sandbox_id"])
-            finally:
-                self.openshell.delete(name)
-        self.registry.update(name, state="stopped")
+            # By name, so a sandbox whose id was never recorded is deleted too.
+            self.openshell.delete(name)
+            return True
+        except Exception as error:
+            log.error("cleanup of %s failed: %s", name, error)
+            return False
+
+    def _abandon(self, name: str, code: str, reason: str) -> None:
+        state = (self.registry.get(name) or {}).get("state")
+        needs_delete = state not in ("reserved",)
+        if needs_delete and not self._remove(name):
+            self.registry.update(name, state="cleanup_failed", error_code=code, error_reason=reason)
+        elif state in ("stopping", "stopped"):
+            self.registry.update(name, state="stopped", error_code=code, error_reason=reason)
+        else:
+            self.registry.reject(name, code, reason)
 
     # -- Cascade Stop -----------------------------------------------------------------
     def stop(self, name: str) -> list[str]:
+        """Children first. Each agent loses its board identity, then its sandbox. An agent
+        still being admitted is marked stopping, so its admission cleans up after itself."""
         order = self.registry.begin_stop(name)
         for n in order:
-            row = self.registry.get(n)
-            if row.get("sandbox_id"):
-                self.board.deregister(sandbox_id=row["sandbox_id"])
-                self.openshell.delete(n)
-            self.registry.update(n, state="stopped")
+            if self.registry.get(n).get("state") != "stopping":
+                continue
+            self.registry.update(n, state="stopped" if self._remove(n) else "cleanup_failed")
         return order

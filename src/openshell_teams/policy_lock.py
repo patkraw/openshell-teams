@@ -47,7 +47,7 @@ class Live:
         # Opened read-only, so a missing registry raises instead of reading as "no teams".
         db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
-            rows = db.execute("SELECT name, providers FROM agents a WHERE state != 'stopped' AND "
+            rows = db.execute("SELECT name, providers FROM agents a WHERE state NOT IN ('stopped', 'rejected') AND "
                               "id = (SELECT MAX(id) FROM agents b WHERE b.name = a.name)").fetchall()
         finally:
             db.close()
