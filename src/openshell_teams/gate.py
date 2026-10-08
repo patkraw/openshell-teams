@@ -188,8 +188,10 @@ class SpawnGate:
             if not req.approval_id or self.approvals is None:
                 raise Rejected("this team requires the user's approval for each worker", "approval_required")
             try:
+                # Bound to the lead's sandbox, not just its name: a replacement lead with
+                # the same name cannot use approvals given to its predecessor.
                 self.approvals.consume(req.approval_id, team=req.team, lead=parent, worker=req.name,
-                                       digest=approval_digest(req))
+                                       digest=approval_digest(req), lead_instance=slot["caller"])
             except Exception as error:
                 raise Rejected(f"approval refused: {error}", "approval_refused") from error
         role = slot["role"]

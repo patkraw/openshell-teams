@@ -29,9 +29,10 @@ class ApprovalClient:
         self.url = admin_url.rstrip("/")
         self.headers = {ADMIN_HEADER: admin_token}
 
-    def consume(self, approval_id: str, *, team: str, lead: str, worker: str, digest: str) -> None:
+    def consume(self, approval_id: str, *, team: str, lead: str, worker: str, digest: str,
+                lead_instance: str | None = None) -> None:
         r = httpx.post(f"{self.url}/v1/admin/approvals/consume", headers=self.headers, timeout=10,
                        json={"approval_id": approval_id, "team": team, "lead": lead,
-                             "worker": worker, "digest": digest})
+                             "worker": worker, "digest": digest, "lead_instance": lead_instance})
         if r.status_code != 200:
             raise PermissionError(r.json().get("error", r.text))

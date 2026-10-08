@@ -232,7 +232,8 @@ class FakeApprovals:
     def __init__(self, approved):
         self.approved = dict(approved)   # approval_id -> (team, lead, worker, digest)
 
-    def consume(self, approval_id, *, team, lead, worker, digest):
+    def consume(self, approval_id, *, team, lead, worker, digest, lead_instance=None):
+        self.instances = getattr(self, "instances", []) + [lead_instance]
         if self.approved.pop(approval_id, None) != (team, lead, worker, digest):
             raise PermissionError("not approved")
 
@@ -452,3 +453,15 @@ def test_the_request_id_covers_the_persona(world):
     with pytest.raises(Rejected) as e:
         gate.admit(changed, lead)
     assert e.value.code == "request_id_reused"
+
+
+def test_spawn_gate_consumes_approvals_for_the_leads_sandbox(world):
+    """Review finding 11: approvals were bound to the lead's name only."""
+    from openshell_teams.gate import approval_digest
+    gate, _, _, _, lead = world
+    gate.charters["t1"].require_approval = True
+    req = worker()
+    gate.approvals = FakeApprovals({"ap1": ("t1", "lead", "reviewer", approval_digest(req))})
+    req.approval_id = "ap1"
+    gate.admit(req, lead)
+    assert gate.approvals.instances == [lead.sandbox_id]

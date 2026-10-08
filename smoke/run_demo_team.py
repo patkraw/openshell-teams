@@ -157,16 +157,30 @@ def run_checks(TEAM, task_id, patch, proposal, op, app, comments) -> None:
     inside_board = "http://host.openshell.internal:8765"
     inside_gate = "http://host.openshell.internal:8766"
 
-    # 1. Unauthorized creation: a worker has no route to Spawn Gate.
-    r = call("reviewer", "POST", f"{inside_gate}/v1/agents", json={"team": TEAM, "name": "x"})
-    check("reviewer creates an agent", r.get("status") in (None, 403) and "admitted" not in str(r), r)
+    # Each check asserts the specific refusal, and where it matters a control showing the
+    # same call succeeds for an agent that is allowed to make it (review finding 19).
+    def denied_by_proxy(r: dict) -> bool:
+        body = str(r.get("body") or "") + str(r.get("error") or "")
+        return ("policy_denied" in body and r.get("status") == 403) or "Permission denied" in body
 
-    # 2. Staffing without approval.
+    def code_of(r: dict) -> str:
+        try:
+            return json.loads(r.get("body") or "{}").get("detail", {}).get("code", "")
+        except (ValueError, AttributeError):
+            return ""
+
+    # 1. Unauthorized creation: a worker has no route to Spawn Gate; the lead does.
+    r = call("reviewer", "POST", f"{inside_gate}/v1/agents", json={"team": TEAM, "name": "x"})
+    control = call("lead", "GET", f"{inside_gate}/v1/teams/{TEAM}/boundary")
+    check("reviewer creates an agent", denied_by_proxy(r) and control.get("status") == 200,
+          f"reviewer={r} lead_control={control.get('status')}")
+
+    # 2. Staffing without approval: refused by Spawn Gate with approval_required.
     reviewer_policy = next(w for w in proposal["workers"] if w["name"] == "reviewer")["policy"]
     r = call("lead", "POST", f"{inside_gate}/v1/agents", json={
         "team": TEAM, "name": "extra", "role": "worker", "persona": "reviewer", "task": "t",
         "policy": reviewer_policy, "providers": [], "request_id": f"x-{uuid.uuid4().hex[:6]}"})
-    check("lead staffs without an approval", r.get("status") == 403, r)
+    check("lead staffs without an approval", r.get("status") == 403 and code_of(r) == "approval_required", r)
 
     # 3. Excess permissions, even when the user approves them: the prover refuses.
     wide = json.loads(json.dumps(reviewer_policy))
@@ -177,6 +191,7 @@ def run_checks(TEAM, task_id, patch, proposal, op, app, comments) -> None:
         "space": TEAM, "workers": [{"name": "intruder", "persona": "reviewer", "role": "worker",
                                     "task": "t", "policy": wide, "providers": []}]})
     pid = json.loads(r.get("body") or "{}").get("id")
+    approval = None
     if pid:
         httpx.post(f"{BOARD}/v1/team-proposals/{pid}/decide", headers=app, timeout=10,
                    json={"approve": True}).raise_for_status()
@@ -187,30 +202,36 @@ def run_checks(TEAM, task_id, patch, proposal, op, app, comments) -> None:
             "team": TEAM, "name": "intruder", "role": "worker", "persona": "reviewer", "task": "t",
             "policy": wide, "providers": [], "approval_id": approval,
             "request_id": f"x-{uuid.uuid4().hex[:6]}"})
-        check("approved worker outside the boundary", r.get("status") == 403, r)
-    else:
-        check("worker outside the boundary (refused at proposal)", r.get("status") in (400, 403, 422), r)
+    check("approved worker outside the boundary",
+          bool(approval) and r.get("status") == 403 and code_of(r) == "prover_exceeds_boundary", r)
 
-    # 4. Impersonation: a forged identity header is replaced; the board names the real caller.
+    # 4. Impersonation: the forged header is replaced; the comment is created and the
+    #    board names the reviewer as its author.
     r = call("reviewer", "POST", f"{inside_board}/v1/board/items/comment",
              headers={"X-OpenShell-Caller": "forged.lead.token"},
              json={"space": TEAM, "id": patch["id"], "body": "forged-as-lead check"})
     forged = next((c for c in comments(patch["id"]) if c["body"] == "forged-as-lead check"), None)
-    check("reviewer posts as the lead", forged is None or forged["author"] == "reviewer",
-          f"author={forged and forged['author']}")
+    check("reviewer posts as the lead", r.get("status") == 200 and forged is not None
+          and forged["author"] == "reviewer", f"status={r.get('status')} author={forged and forged['author']}")
 
-    # 5. Outside communication rights: create is not a worker right; the lead's item is not
-    #    in the reviewer's slice.
+    # 5. Outside communication rights: create is not a worker right (Channel Guard), and
+    #    the lead's item is not in the reviewer's slice while the patch item is.
     r = call("reviewer", "POST", f"{inside_board}/v1/board/items",
              json={"space": TEAM, "title": "t", "criteria": "c"})
-    check("reviewer creates a board item", r.get("status") == 403, r)
+    check("reviewer creates a board item", denied_by_proxy(r), r)
     r = call("reviewer", "GET", f"{inside_board}/v1/board/item",
              params={"space": TEAM, "id": task_id})
-    check("reviewer reads the lead's task item", r.get("status") in (403, 404), r)
+    control = call("reviewer", "GET", f"{inside_board}/v1/board/item",
+                   params={"space": TEAM, "id": patch["id"]})
+    check("reviewer reads the lead's task item", r.get("status") == 404 and control.get("status") == 200,
+          f"lead_item={r.get('status')} patch_item_control={control.get('status')}")
 
-    # 6. The lead does the patcher's job itself: no GitHub route from the lead's sandbox.
+    # 6. The lead does the patcher's job itself: no GitHub route from the lead's sandbox,
+    #    while the patcher can reach GitHub.
     out = in_sandbox("lead", "git", "ls-remote", REPO)
-    check("lead clones from GitHub", "HEAD" not in out, out.splitlines()[-1] if out else out)
+    control = in_sandbox("patcher", "git", "ls-remote", REPO)
+    check("lead clones from GitHub", "HEAD" not in out and "connect" in out.lower() and "HEAD" in control,
+          f"lead: {out.splitlines()[-1] if out else out} | patcher control: {'HEAD' in control}")
 
     # 7. Widening after launch: Policy Lock (gateway interceptor) refuses policy and
     #    credential changes to team sandboxes, even from the operator's own CLI. The CLI
@@ -234,8 +255,9 @@ def run_checks(TEAM, task_id, patch, proposal, op, app, comments) -> None:
     # 8. Worker outliving its lead: Cascade Stop.
     stopped = httpx.post(f"{GATE}/v1/agents/lead/stop", headers={"X-Operator-Token": op},
                          timeout=600).json()
-    alive = [n for n in ("lead", "patcher", "reviewer")
-             if sh(OPENSHELL, "sandbox", "get", n).returncode == 0]
+    gone = {n: "not found" in (sh(OPENSHELL, "sandbox", "get", n).stderr or "")
+            for n in ("lead", "patcher", "reviewer")}
+    alive = [n for n, g in gone.items() if not g]
     check("workers outlive the lead", not alive, f"stopped={stopped} alive={alive}")
 
     print(f"\n{sum(results)}/{len(results)} checks refused as expected")
