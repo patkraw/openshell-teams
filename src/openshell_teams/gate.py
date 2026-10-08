@@ -44,6 +44,7 @@ class AgentRequest:
     kind: str = "staffing"            # staffing | delegation | lead
     providers: list[str] = field(default_factory=list)
     command: list[str] = field(default_factory=list)   # what to start in the sandbox
+    persona: str = ""                                  # the harness persona to run, e.g. reviewer
 
     def digest(self) -> str:
         body = json.dumps({"name": self.name, "role": self.role, "policy": self.policy,
@@ -129,6 +130,12 @@ class SpawnGate:
             raise Rejected(f"an agent named {req.name!r} is already running", "name_in_use") from error
         if slot["retry"]:
             return slot
+        role = slot["role"]
+        if charter.runtime_command and (caller.kind == "agent" or not req.command):
+            # Agents never choose what runs in a sandbox: the team's runtime decides.
+            req.command = charter.command_for(name=req.name, persona=req.persona, role=role)
+        if not req.providers:
+            req.providers = list(charter.default_providers)
         try:
             grant = self._resolve(req, charter)
             self._check(grant, req, charter)

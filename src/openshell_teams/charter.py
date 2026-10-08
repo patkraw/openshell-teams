@@ -23,6 +23,14 @@ class TeamCharter:
     endpoint_map: dict             # action -> {method, path}
     board: Board
     board_binaries: list[str] = field(default_factory=lambda: ["/usr/bin/python3"])
+    # How agents are started: a command template ({team}, {name}, {persona}, {role}) and the
+    # providers agents get by default. Set by the operator, not by agents.
+    runtime_command: list[str] = field(default_factory=list)
+    default_providers: list[str] = field(default_factory=list)
+
+    def command_for(self, *, name: str, persona: str, role: str) -> list[str]:
+        values = {"team": self.team, "name": name, "persona": persona or role, "role": role}
+        return [part.format(**values) for part in self.runtime_command]
 
 
 def load(directory: Path, team: str) -> TeamCharter:
@@ -33,6 +41,8 @@ def load(directory: Path, team: str) -> TeamCharter:
     endpoints = yaml.safe_load((d / "endpoint-map.yaml").read_text())
     host, port = endpoints["service"].rsplit(":", 1)
     limits = boundary.get("limits", {})
+    runtime_file = d / "runtime.yaml"
+    runtime = yaml.safe_load(runtime_file.read_text()) if runtime_file.exists() else {}
     return TeamCharter(
         team=team,
         boundary=boundary["policy"],
@@ -44,4 +54,6 @@ def load(directory: Path, team: str) -> TeamCharter:
         endpoint_map=endpoints["actions"],
         board=Board(host=host, port=int(port)),
         board_binaries=list(endpoints.get("binaries", ["/usr/bin/python3"])),
+        runtime_command=list(runtime.get("command", [])),
+        default_providers=list(runtime.get("providers", [])),
     )

@@ -30,6 +30,8 @@ class TeamIn(BaseModel):
     charter_dir: str
     lead_name: str = "lead"
     lead_command: list[str] = Field(default_factory=list)
+    lead_persona: str = ""
+    providers: list[str] = Field(default_factory=list)
     request_id: str
 
 
@@ -43,6 +45,7 @@ class AgentIn(BaseModel):
     kind: str = "staffing"
     providers: list[str] = Field(default_factory=list)
     command: list[str] = Field(default_factory=list)
+    persona: str = ""
 
 
 def create_app(gate: SpawnGate, public_key, audience: str, operator_token: str) -> FastAPI:
@@ -75,7 +78,29 @@ def create_app(gate: SpawnGate, public_key, audience: str, operator_token: str) 
         gate.charters[body.team] = charter
         gate.registry.add_team(body.team, max_workers=charter.max_workers)
         return run(AgentRequest(body.team, body.lead_name, "lead", {}, "lead the team", body.request_id,
-                                kind="lead", command=body.lead_command), caller)
+                                kind="lead", command=body.lead_command, persona=body.lead_persona,
+                                providers=body.providers), caller)
+
+    @app.get("/v1/teams/{team}/boundary")
+    def boundary(team: str, caller: Caller = Depends(agent)):
+        """What a team member may ask for: the team boundary, by name. Used by the lead to
+        build workers' proposed policies from the boundary's own pieces."""
+        me = gate.registry.by_sandbox(caller.sandbox_id or "")
+        charter = gate.charters.get(team)
+        if not me or not charter or me["team"] != team or me["state"] != "running":
+            raise HTTPException(403, "not a running member of this team")
+        policy = charter.boundary
+        board = (charter.board.host, charter.board.port)
+        return {
+            "team": team,
+            "filesystem_policy": policy.get("filesystem_policy", {}),
+            # Full entries, so a proposal can copy them exactly as the prover expects.
+            "network_policies": {name: entry for name, entry in policy.get("network_policies", {}).items()
+                                 if all((e["host"], e["port"]) != board for e in entry.get("endpoints", []))},
+            "providers": charter.credentials,
+            "roles": sorted(r for r in charter.access_rules if r != "lead"),
+            "max_workers": charter.max_workers,
+        }
 
     @app.post("/v1/agents")
     def create_agent(body: AgentIn, caller: Caller = Depends(agent)):
