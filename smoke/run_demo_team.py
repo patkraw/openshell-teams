@@ -17,7 +17,7 @@ import uuid
 
 import httpx
 
-from run_team_real import BOARD, HERE, STATE, user_token
+from run_team_real import BOARD, HERE, OW_STATE, STATE, user_token
 
 TEAM = f"demo{uuid.uuid4().hex[:4]}"
 GATE = "http://127.0.0.1:8766"
@@ -200,7 +200,8 @@ def main() -> None:
     def verdict():
         cs = comments(patch["id"])
         diff = next((c for c in cs if c["author"] == "patcher" and "Patched by" in c["body"]), None)
-        rev = next((c for c in cs if c["author"] == "reviewer"), None)
+        rev = next((c for c in cs if c["author"] == "reviewer"
+                    and any(v in c["body"].upper() for v in ("APPROVE", "REQUEST CHANGES"))), None)
         return (diff, rev) if diff and rev else None
 
     diff, rev = wait("diff and verdict", verdict, seconds=1200)
