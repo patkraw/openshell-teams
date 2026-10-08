@@ -19,7 +19,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).parent))
 from run_skeleton import HTTP  # noqa: E402  bash-only HTTP helper for the lead
 
-STATE = Path.home() / "forks/.local/teams"
+from config import STATE  # noqa: E402
 HERE = Path(__file__).parent
 TEAM = "proj2"
 

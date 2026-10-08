@@ -21,7 +21,7 @@ from run_team_real import BOARD, HERE, STATE, user_token
 
 TEAM = f"demo{uuid.uuid4().hex[:4]}"
 GATE = "http://127.0.0.1:8766"
-OPENSHELL = str(STATE.parent / "openshell-0.1.2/bin/openshell")
+from config import OPENSHELL  # noqa: E402
 PY = "/usr/local/lib/openworker/venv/bin/python"
 REPO = "https://github.com/octocat/Hello-World"
 

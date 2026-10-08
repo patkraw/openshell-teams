@@ -15,7 +15,7 @@ from pathlib import Path
 
 import httpx
 
-STATE = Path.home() / "forks/.local/teams"
+from config import STATE  # noqa: E402
 HERE = Path(__file__).parent
 
 # bash-only HTTP over /dev/tcp (the base image has no curl or python)

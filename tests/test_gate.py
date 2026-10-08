@@ -188,7 +188,8 @@ def test_no_new_agents_under_a_stopping_lead(world):
     assert e.value.code in ("not_authorized", "parent_stopping")
 
 
-PROVER = os.path.expanduser("~/forks/.local/openshell-0.1.2/bin/openshell-prover")
+PROVER = (os.environ.get("OPENSHELL_PROVER") or shutil.which("openshell-prover")
+          or os.path.expanduser("~/forks/.local/openshell-0.1.2/bin/openshell-prover"))
 
 
 @pytest.mark.skipif(not shutil.which(PROVER), reason="openshell-prover 0.1.2 not installed")

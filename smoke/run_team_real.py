@@ -16,8 +16,7 @@ from pathlib import Path
 
 import httpx
 
-STATE = Path.home() / "forks/.local/teams"
-OW_STATE = Path.home() / "forks/.local/ow-state"
+from config import OW_STATE, OPENWORKER_DIR, STATE  # noqa: E402
 HERE = Path(__file__).parent
 TEAM = f"team{uuid.uuid4().hex[:4]}"
 BOARD = "http://127.0.0.1:8765"
@@ -35,7 +34,7 @@ def user_token() -> str:
     out = subprocess.run(
         ["uv", "run", "python", "-m", "coworker.teams.cli", "board", "token", "mint",
          "--actor", "user", "--role", "user"],
-        cwd=Path.home() / "forks/openworker", capture_output=True, text=True, check=True,
+        cwd=OPENWORKER_DIR, capture_output=True, text=True, check=True,
         env={**os.environ, "COWORKER_STATE_DIR": str(OW_STATE)})
     return next(line.strip() for line in out.stdout.splitlines() if line.strip().startswith("owb_"))
 
