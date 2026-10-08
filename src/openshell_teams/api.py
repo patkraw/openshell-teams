@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from . import charter as charter_mod
 from . import passport
-from .boardclient import BoardRegistrar
+from .boardclient import ApprovalClient, BoardRegistrar
 from .gate import AgentRequest, Caller, Rejected, SpawnGate
 from .openshell import OpenShellCLI
 from .prover import Prover
@@ -46,6 +46,7 @@ class AgentIn(BaseModel):
     providers: list[str] = Field(default_factory=list)
     command: list[str] = Field(default_factory=list)
     persona: str = ""
+    approval_id: str = ""
 
 
 def create_app(gate: SpawnGate, public_key, audience: str, operator_token: str) -> FastAPI:
@@ -138,7 +139,8 @@ def main() -> None:
     a.state.mkdir(parents=True, exist_ok=True)
     gate = SpawnGate({}, Registry(a.state / "registry.db"), Prover(a.prover),
                      OpenShellCLI(a.openshell, a.state / "logs", image=a.image),
-                     BoardRegistrar(a.board_admin_url, a.board_admin_token_file.read_text().strip()))
+                     BoardRegistrar(a.board_admin_url, a.board_admin_token_file.read_text().strip()),
+                     ApprovalClient(a.board_admin_url, a.board_admin_token_file.read_text().strip()))
     keys = passport.load_or_create_keys(a.keys)
     app = create_app(gate, keys.public, passport.audience_for("host.openshell.internal", a.port),
                      a.operator_token_file.read_text().strip())

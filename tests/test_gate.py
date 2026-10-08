@@ -222,3 +222,48 @@ def test_the_admitted_grant_is_recorded_for_audit(world):
     gate, reg, os_, _, lead = world
     gate.admit(worker(), lead)
     assert _json.loads(reg.get("reviewer")["grant_json"]) == os_.created["reviewer"]
+
+
+class FakeApprovals:
+    def __init__(self, approved):
+        self.approved = dict(approved)   # approval_id -> (team, lead, worker, digest)
+
+    def consume(self, approval_id, *, team, lead, worker, digest):
+        if self.approved.pop(approval_id, None) != (team, lead, worker, digest):
+            raise PermissionError("not approved")
+
+
+def test_team_requiring_approval_admits_only_the_approved_worker_once(world):
+    from openshell_teams.gate import approval_digest
+    gate, _, os_, _, lead = world
+    gate.charters["t1"].require_approval = True
+    req = worker()
+    gate.approvals = FakeApprovals({"ap1": ("t1", "lead", "reviewer", approval_digest(req))})
+    req.approval_id = "ap1"
+    assert gate.admit(req, lead)["state"] == "running"
+    again = worker(name="reviewer2", rid="r2")
+    again.approval_id = "ap1"
+    with pytest.raises(Rejected) as e:
+        gate.admit(again, lead)
+    assert e.value.code == "approval_refused" and "reviewer2" not in os_.created
+
+
+def test_a_changed_policy_does_not_match_the_approval(world):
+    from openshell_teams.gate import approval_digest
+    gate, _, os_, _, lead = world
+    gate.charters["t1"].require_approval = True
+    approved_req = worker()
+    gate.approvals = FakeApprovals({"ap1": ("t1", "lead", "reviewer", approval_digest(approved_req))})
+    sneaky = worker(policy={"version": 1, "network_policies": BOUNDARY["network_policies"]})
+    sneaky.approval_id = "ap1"
+    with pytest.raises(Rejected) as e:
+        gate.admit(sneaky, lead)
+    assert e.value.code == "approval_refused" and "reviewer" not in os_.created
+
+
+def test_missing_approval_is_refused_when_required(world):
+    gate, _, _, _, lead = world
+    gate.charters["t1"].require_approval = True
+    with pytest.raises(Rejected) as e:
+        gate.admit(worker(), lead)
+    assert e.value.code == "approval_required"

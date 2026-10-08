@@ -45,6 +45,7 @@ class AgentRequest:
     providers: list[str] = field(default_factory=list)
     command: list[str] = field(default_factory=list)   # what to start in the sandbox
     persona: str = ""                                  # the harness persona to run, e.g. reviewer
+    approval_id: str = ""                              # the user's approval, when the team requires one
 
     def digest(self) -> str:
         body = json.dumps({"name": self.name, "role": self.role, "policy": self.policy,
@@ -53,14 +54,23 @@ class AgentRequest:
         return hashlib.sha256(body.encode()).hexdigest()
 
 
+def approval_digest(req: "AgentRequest") -> str:
+    """What the user approved for one worker; the harness computes the same digest."""
+    canonical = {"name": req.name, "role": req.role, "persona": req.persona, "policy": req.policy,
+                 "providers": sorted(req.providers)}
+    return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def grant_hash(grant: dict) -> str:
     return "sha256:" + hashlib.sha256(json.dumps(grant, sort_keys=True).encode()).hexdigest()
 
 
 class SpawnGate:
-    def __init__(self, charters: dict[str, TeamCharter], registry: Registry, prover, openshell, board):
+    def __init__(self, charters: dict[str, TeamCharter], registry: Registry, prover, openshell, board,
+                 approvals=None):
         self.charters, self.registry = charters, registry
         self.prover, self.openshell, self.board = prover, openshell, board
+        self.approvals = approvals   # consumes approval IDs with the harness (None: not supported)
 
     # -- step 2: authorize ------------------------------------------------------------
     def _authorize(self, req: AgentRequest, caller: Caller, charter: TeamCharter) -> str:
@@ -130,6 +140,19 @@ class SpawnGate:
             raise Rejected(f"an agent named {req.name!r} is already running", "name_in_use") from error
         if slot["retry"]:
             return slot
+        if charter.require_approval and req.kind == "staffing":
+            # Before anything is resolved or defaulted: the digest covers exactly what was sent.
+            try:
+                if not req.approval_id or self.approvals is None:
+                    raise Rejected("this team requires the user's approval for each worker", "approval_required")
+                self.approvals.consume(req.approval_id, team=req.team, lead=parent, worker=req.name,
+                                       digest=approval_digest(req))
+            except Rejected:
+                self.registry.update(req.name, state="stopped")
+                raise
+            except Exception as error:
+                self.registry.update(req.name, state="stopped")
+                raise Rejected(f"approval refused: {error}", "approval_refused") from error
         role = slot["role"]
         if charter.runtime_command and (caller.kind == "agent" or not req.command):
             # Agents never choose what runs in a sandbox: the team's runtime decides.
