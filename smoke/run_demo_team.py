@@ -88,6 +88,20 @@ def wait(what: str, check, seconds: int = 900, every: int = 5):
     raise SystemExit(f"timed out waiting for {what}")
 
 
+def board_timeline() -> None:
+    """Every board event so far, read from the board's store on the host (the user's view)."""
+    import sqlite3
+    db = sqlite3.connect(f"file:{OW_STATE / 'teams.db'}?mode=ro", uri=True)
+    rows = db.execute(
+        "SELECT seq, actor, kind, item_id, coalesce(json_extract(payload,'$.body'), json_extract(payload,'$.title'),"
+        " json_extract(payload,'$.assignee'), json_extract(payload,'$.to'), json_extract(payload,'$.dst'), '')"
+        " FROM team_events WHERE space=? ORDER BY seq", (TEAM,)).fetchall()
+    print("\n=== BOARD TIMELINE (who did what, in order) ===")
+    for seq, actor, kind, item, text in rows:
+        text = " ".join(str(text).split())
+        print(f"  #{seq:<4} {actor:9} {kind:18} item {item or '-':<3} {text[:150]}")
+
+
 def main() -> None:
     op = (STATE / "operator.token").read_text().strip()
     r = httpx.post(f"{GATE}/v1/teams", headers={"X-Operator-Token": op}, timeout=900, json={
@@ -108,10 +122,14 @@ def main() -> None:
         return [p for p in ps if p["space"] == TEAM and p["state"] == "pending"]
 
     proposal = wait("the lead's proposal", pending)[0]
-    print("\n=== APPROVAL CARD ===")
+    print("\n=== APPROVAL CARD (what the user approves) ===")
     for w in proposal["workers"]:
-        print(f"  {w['name']} (persona {w['persona']}): network "
-              f"{sorted((w['policy'].get('network_policies') or {}).keys())}")
+        net = w["policy"].get("network_policies") or {}
+        print(f"  {w['name']}  persona={w['persona']}  providers={w.get('providers') or []}")
+        for entry, body in sorted(net.items()):
+            hosts = ", ".join(f"{e['host']}:{e.get('port')}" for e in body.get("endpoints", []))
+            print(f"      network {entry:10} -> {hosts}")
+        print(f"      writable  {w['policy'].get('filesystem_policy', {}).get('read_write')}")
     httpx.post(f"{BOARD}/v1/team-proposals/{proposal['id']}/decide", headers=app, timeout=10,
                json={"approve": True}).raise_for_status()
     httpx.post(f"{BOARD}/v1/board/items/comment", headers=user, timeout=30, json={
@@ -142,6 +160,7 @@ def main() -> None:
     diff, rev = wait("diff and verdict", verdict, seconds=1200)
     print("\n=== PATCHER (on item %s) ===\n%s" % (patch["id"], diff["body"][:800]))
     print("\n=== REVIEWER (on the same item) ===\n%s" % rev["body"][:400])
+    board_timeline()
 
     run_checks(TEAM, task["id"], patch, proposal, op, app, comments)
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 
 from . import channel_guard, policy
@@ -125,10 +126,13 @@ class SpawnGate:
                                              lead_only=charter.lead_only)
         return policy.with_passport(ceiling, board_host=charter.board.host)
 
-    def _prove(self, candidate: dict, ceiling: dict) -> str:
+    def _prove(self, candidate: dict, ceiling: dict, label: str = "") -> str:
         provable, _ = policy.split(candidate)
         ceiling_provable, _ = policy.split(ceiling)
+        started = time.monotonic()
         verdict, _detail = self.prover.check(provable, ceiling_provable)
+        log.info("step %s: prover says %s in %.1fs (entries: %s)", label, verdict, time.monotonic() - started,
+                 ", ".join(sorted(provable.get("network_policies", {}))))
         return verdict
 
     def _check(self, grant: dict, req: AgentRequest, role: str, charter: TeamCharter) -> None:
@@ -140,7 +144,7 @@ class SpawnGate:
         bad = sorted(set(req.providers) - set(charter.credentials))
         if bad:
             raise Rejected(f"providers outside the team boundary: {bad}", "providers")
-        verdict = self._prove(grant, ceiling)
+        verdict = self._prove(grant, ceiling, label=f"{req.name} grant vs {role} ceiling")
         if verdict != "within_boundary":
             raise Rejected(f"prover: {verdict}", f"prover_{verdict}")
 
@@ -181,6 +185,7 @@ class SpawnGate:
         """Advance one step, unless a stop got there first."""
         if not self.registry.transition(name, (from_state,), to_state, **fields):
             raise Rejected("stopped while being created", "parent_stopping")
+        log.info("step %s: %s -> %s", name, from_state, to_state)
 
     def _admit_reserved(self, req: AgentRequest, slot: dict, parent: str, charter: TeamCharter) -> dict:
         if charter.require_approval and req.kind == "staffing":
@@ -192,6 +197,7 @@ class SpawnGate:
                 # the same name cannot use approvals given to its predecessor.
                 self.approvals.consume(req.approval_id, team=req.team, lead=parent, worker=req.name,
                                        digest=approval_digest(req), lead_instance=slot["caller"])
+                log.info("step %s: approval %s… consumed", req.name, req.approval_id[:8])
             except Exception as error:
                 raise Rejected(f"approval refused: {error}", "approval_refused") from error
         role = slot["role"]
@@ -217,7 +223,8 @@ class SpawnGate:
         if differences:
             raise Rejected("launched policy differs from the admitted grant: " + "; ".join(differences),
                            "launch_check")
-        verdict = self._prove(launched, self._ceiling(role, charter))
+        log.info("step %s: launched policy equals the admitted grant", req.name)
+        verdict = self._prove(launched, self._ceiling(role, charter), label=f"{req.name} launched vs {role} ceiling")
         if verdict != "within_boundary":
             raise Rejected(f"launched policy is not within the boundary: {verdict}", "launch_check")
         self.board.register(sandbox_id=sandbox["id"], team=req.team, name=req.name, role=role)
