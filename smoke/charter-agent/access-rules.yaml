@@ -1,0 +1,3 @@
+roles:
+  lead: [read, create, assign, comment, consume]
+  worker: [read, comment, move, consume]

@@ -1,0 +1,32 @@
+# Team boundary for agents in OpenWorker's image (openworker:local).
+policy:
+  version: 1
+  filesystem_policy:
+    include_workdir: true
+    read_only: [/usr, /lib, /etc, /var/log, /proc, /dev/urandom]
+    read_write: [/tmp, /dev/null]
+  landlock: { compatibility: hard_requirement }
+  process: { run_as_user: "1000", run_as_group: "1000" }
+  network_policies:
+    board:
+      name: board
+      endpoints:
+        - host: host.openshell.internal
+          port: 8765
+          protocol: rest
+          enforcement: enforce
+          rules:
+            - allow: { method: "*", path: "/v1/board/**" }
+      binaries: [{ path: /usr/local/lib/openworker/venv/bin/python }, { path: /usr/bin/bash }]
+    spawn:
+      name: spawn
+      endpoints:
+        - host: host.openshell.internal
+          port: 8766
+          protocol: rest
+          enforcement: enforce
+          rules:
+            - allow: { method: POST, path: "/v1/agents" }
+      binaries: [{ path: /usr/bin/bash }]
+credentials: [openworker-anthropic]
+limits: { max_workers: 2, max_depth: 1 }

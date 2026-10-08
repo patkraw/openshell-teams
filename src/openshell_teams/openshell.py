@@ -19,8 +19,9 @@ class OpenShellError(RuntimeError):
 
 
 class OpenShellCLI:
-    def __init__(self, binary: str, log_dir: Path):
+    def __init__(self, binary: str, log_dir: Path, image: str | None = None):
         self.bin = binary
+        self.image = image   # sandbox image for every agent, e.g. openworker:local
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -38,6 +39,8 @@ class OpenShellCLI:
             yaml.safe_dump(grant, f)
         args = ["sandbox", "create", "--name", name, "--detach", "--no-tty", "--no-auto-providers",
                 "--policy", f.name]
+        if self.image:
+            args += ["--from", self.image]
         for p in providers:
             args += ["--provider", p]
         for k, v in labels.items():

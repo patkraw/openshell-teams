@@ -107,11 +107,12 @@ def main() -> None:
     p.add_argument("--board-admin-url", required=True)
     p.add_argument("--board-admin-token-file", type=Path, required=True)
     p.add_argument("--operator-token-file", type=Path, required=True)
+    p.add_argument("--image", default=None, help="sandbox image for every agent (default: OpenShell's base image)")
     a = p.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     a.state.mkdir(parents=True, exist_ok=True)
     gate = SpawnGate({}, Registry(a.state / "registry.db"), Prover(a.prover),
-                     OpenShellCLI(a.openshell, a.state / "logs"),
+                     OpenShellCLI(a.openshell, a.state / "logs", image=a.image),
                      BoardRegistrar(a.board_admin_url, a.board_admin_token_file.read_text().strip()))
     keys = passport.load_or_create_keys(a.keys)
     app = create_app(gate, keys.public, passport.audience_for("host.openshell.internal", a.port),
