@@ -1,0 +1,8 @@
+# How every agent on this team is started (set by the operator, not by agents).
+command: [openworker, agent, --space, "{team}", --coworker, "{persona}",
+          --model, "openai:aws/anthropic/bedrock-claude-sonnet-5-5",
+          --base-url, "https://inference-api.nvidia.com/v1",
+          --poll-seconds, "3", --workspace, /tmp/ws]
+providers: [openworker-nvidia]
+
+require_approval: true

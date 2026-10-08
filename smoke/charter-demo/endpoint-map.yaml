@@ -1,0 +1,11 @@
+service: host.openshell.internal:8765
+binaries: [/usr/local/lib/openworker/venv/bin/python]
+actions:
+  read:    { method: GET,  path: "/v1/board/**" }
+  create:  { method: POST, path: "/v1/board/items" }
+  assign:  { method: POST, path: "/v1/board/items/assign" }
+  comment: { method: POST, path: "/v1/board/items/comment" }
+  move:    { method: POST, path: "/v1/board/items/transition" }
+  consume: { method: POST, path: "/v1/board/consume" }
+  link:    { method: POST, path: "/v1/board/link" }
+  propose: { method: POST, path: "/v1/board/team-proposals" }
